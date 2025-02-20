@@ -647,7 +647,7 @@ if __name__ == "__main__":
                 projector_pre = DINOHead(in_dim=args.feat_dim, out_dim=args.num_labeled_classes, nlayers=args.num_mlp_layers)
                 model_pre = nn.Sequential(backbone, projector_pre)
                 if args.load_offline_id is not None:
-                    load_dir_online = os.path.join(exp_root_happy + '_' + 'offline', args.dataset_name, args.load_offline_id, 'checkpoints', 'model_best.pt')
+                    load_dir_online = os.path.join(exp_root + '_' + 'offline', args.dataset_name, args.load_offline_id, 'checkpoints', 'model_best.pt')
                     args.logger.info('loading offline checkpoints from: ' + load_dir_online)
                     load_dict = torch.load(load_dir_online)
                     model_pre.load_state_dict(load_dict['model'])
