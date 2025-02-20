@@ -21,7 +21,7 @@ from models.utils_simgcd import DINOHead, get_params_groups, SupConLoss, info_nc
 from models.utils_simgcd_pro import get_kmeans_centroid_for_new_head
 from models.utils_proto_aug import ProtoAugManager
 from models import vision_transformer as vits
-from config import dino_pretrain_path, exp_root_happy
+from config import dino_pretrain_path, exp_root
 
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -392,7 +392,7 @@ if __name__ == "__main__":
     parser.add_argument('--gamma', type=float, default=0.1)
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--weight_decay', type=float, default=5e-5)
-    parser.add_argument('--exp_root', type=str, default=exp_root_happy)
+    parser.add_argument('--exp_root', type=str, default=exp_root)
     parser.add_argument('--transform', type=str, default='imagenet')
 
     parser.add_argument('--temperature', type=float, default=1.0)
