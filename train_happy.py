@@ -15,7 +15,7 @@ from project_utils.general_utils import set_seed, init_experiment, AverageMeter
 from project_utils.cluster_and_log_utils import log_accs_from_preds
 
 from data.augmentations import get_transform
-from data.get_datasets import get_class_splits, ContrastiveLearningViewGenerator, get_datasets
+from data.get_datasets_Original import get_class_splits, ContrastiveLearningViewGenerator, get_datasets
 
 from models.utils_simgcd import DINOHead, get_params_groups, SupConLoss, info_nce_logits, DistillLoss
 from models.utils_simgcd_pro import get_kmeans_centroid_for_new_head
@@ -71,17 +71,17 @@ def train_offline(student, train_loader, test_loader, args):
             sup_labels = torch.cat([class_labels[mask_lab] for _ in range(2)], dim=0)
             cls_loss = nn.CrossEntropyLoss()(sup_logits, sup_labels)
 
-            # clustering, unsup
+            # clustering, unsup: SimGCD Eq.(4)
             cluster_loss = cluster_criterion(student_out, teacher_out, epoch)
             avg_probs = (student_out / 0.1).softmax(dim=1).mean(dim=0)
             me_max_loss = - torch.sum(torch.log(avg_probs**(-avg_probs))) + math.log(float(len(avg_probs)))
             cluster_loss += args.memax_weight * me_max_loss
 
-            # represent learning, unsup
+            # represent learning, unsup: SimGCD Eq.(1)
             contrastive_logits, contrastive_labels = info_nce_logits(features=student_proj)
             contrastive_loss = torch.nn.CrossEntropyLoss()(contrastive_logits, contrastive_labels)
 
-            # representation learning, sup
+            # representation learning, sup: SimGCD Eq.(2)
             student_proj = torch.cat([f[mask_lab].unsqueeze(1) for f in student_proj.chunk(2)], dim=1)
             student_proj = torch.nn.functional.normalize(student_proj, dim=-1)
 
@@ -221,15 +221,11 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             # clustering, unsup
             cluster_loss = cluster_criterion(student_out, teacher_out, epoch)
             avg_probs = (student_out / 0.1).softmax(dim=1).mean(dim=0)
-            #me_max_loss = - torch.sum(torch.log(avg_probs**(-avg_probs))) + math.log(float(len(avg_probs)))
-            #cluster_loss += args.memax_weight * me_max_loss
 
             # 1. inter old and new
             avg_probs_old_in = avg_probs[:args.num_seen_classes]
             avg_probs_new_in = avg_probs[args.num_seen_classes:]
 
-            #avg_probs_old_new = torch.tensor([torch.sum(avg_probs_old_in), torch.sum(avg_probs_new_in)], requires_grad=True, device=device)
-            #me_max_loss_old_new = - torch.sum(torch.log(avg_probs_old_new**(-avg_probs_old_new))) + math.log(float(len(avg_probs_old_new)))
             avg_probs_old_marginal, avg_probs_new_marginal = torch.sum(avg_probs_old_in), torch.sum(avg_probs_new_in)
             me_max_loss_old_new =  avg_probs_old_marginal * torch.log(avg_probs_old_marginal) + avg_probs_new_marginal * torch.log(avg_probs_new_marginal) + math.log(2)
 
@@ -249,13 +245,21 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             # represent learning, unsup
             contrastive_logits, contrastive_labels = info_nce_logits(features=student_proj)
             contrastive_loss = torch.nn.CrossEntropyLoss()(contrastive_logits, contrastive_labels)
-
+            """
+            这段代码主要进行了以下几步操作：
+            1. 调用 `proto_aug_manager` 的方法计算一种基于难度感知的原型增强损失（proto aug hardness aware loss），结果存储在变量 `proto_aug_loss` 中，这部分损失用于度量增强过程中原型难易程度的变化。
+            2. 利用 `student` 网络的第一部分（通常对应于特征提取部分）对输入图片 `images` 进行前向传播，获得特征 `feats`，随后使用归一化操作（L2归一化）将特征向量的模长归一化，确保各特征值在相同尺度上进行比较。
+            3. 使用 `torch.no_grad()` 模式，通过 `student_pre` 网络的第一部分对同样的输入 `images` 进行特征提取，得到教师网络对应的特征 `feats_pre`，同时也对这些特征进行了归一化操作。这一过程不会计算梯度，以免影响模型参数更新。
+            4. 通过计算学生和教师网络归一化后特征的差的平方和，再除以特征数量，得到了特征蒸馏损失（feature distillation loss），该损失用于让学生网络在特征层面上模仿教师网络的输出，从而实现特征层面的知识迁移。
+            """
             proto_aug_loss = proto_aug_manager.compute_proto_aug_hardness_aware_loss(student)
             feats = student[0](images)
             feats = torch.nn.functional.normalize(feats, dim=-1)
             with torch.no_grad():
                 feats_pre = student_pre[0](images)
                 feats_pre = torch.nn.functional.normalize(feats_pre, dim=-1)
+
+            # 这行代码计算的是特征蒸馏损失，用于让学生网络的特征模仿教师网络的输出，从而在增量学习中帮助保留之前学到的知识，减少灾难性遗忘。
             feat_distill_loss = (feats-feats_pre).pow(2).sum() / len(feats)
 
             # Total loss
@@ -306,9 +310,6 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             'epoch': epoch + 1,
         }
 
-        #torch.save(save_dict, args.model_path[:-3] + '_session-' + str(current_session) + f'.pt')   # NOTE!!! session
-        #args.logger.info("model saved to {}.".format(args.model_path[:-3] + '_session-' + str(current_session) + f'.pt'))
-
         if all_acc_test > best_test_acc_all:
 
             args.logger.info(f'Best ACC on All Classes on test set of session-{current_session}: {all_acc_test:.4f}...')
@@ -353,8 +354,11 @@ def test_online(model, test_loader, epoch, save_name, args):
             _, logits = model(images)
             preds.append(logits.argmax(1).cpu().numpy())
             targets.append(label.cpu().numpy())
+
+            # args.train_classes 原始训练时定义的类别
             mask_hard = np.append(mask_hard, np.array([True if x.item() in range(len(args.train_classes))
                                          else False for x in label]))
+            # args.num_seen_classes 当前已见类别范围
             mask_soft = np.append(mask_soft, np.array([True if x.item() in range(args.num_seen_classes)
                                          else False for x in label]))
 

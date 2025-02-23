@@ -1,5 +1,5 @@
 """
-get_datasets with CLEAR10/100
+get_datasets 原版
 2025_2_23
 author: wei jin
 """
@@ -37,8 +37,6 @@ sub_sample_class_funcs = {
     'cub': subsample_dataset_cub,
     'aircraft': subsample_dataset_aircraft,
     'scars': subsample_dataset_scars,
-    # 添加CLEAR10/100
-    'clear10': subsample_dataset_clear,
 }
 
 get_dataset_funcs = {
@@ -49,8 +47,6 @@ get_dataset_funcs = {
     'cub': get_cub_datasets,
     'aircraft': get_aircraft_datasets,
     'scars': get_scars_datasets,
-    # 添加CLEAR10/100
-    'clear10': get_clear_10_datasets,
 }
 
 
@@ -160,6 +156,22 @@ def get_class_splits(args):
         if args.num_old_classes > 0:
             args.train_classes = range(args.num_old_classes)
             args.unlabeled_classes = range(args.num_old_classes, 100)
+
+    # ------------------------------ CLEAR10 -------------------------------
+    elif args.dataset_name == 'clear10':
+
+        args.image_size = 224
+        args.train_classes = range(7)
+        args.unlabeled_classes = range(7, 10)
+
+        if args.num_old_classes > 0:
+            args.train_classes = range(args.num_old_classes)
+            args.unlabeled_classes = range(args.num_old_classes, 10)
+
+    # ----------------------------------------------------------------------
+
+
+
 
     elif args.dataset_name == 'tiny_imagenet':
 

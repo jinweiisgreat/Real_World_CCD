@@ -18,7 +18,7 @@ osr_split_dir = '/home/ps/_lzj/GCD/code/SimGCD_ovdet/data/ssb_splits'
 # -----------------
 
 dino_pretrain_path = '/home/ps/_lzj/GCD/model/pretrained_models/dino/dino_vitbase16_pretrain.pth'
-# feature_extract_dir = '/home/ps/_lzj/GCD/code/store/osr_novel_categories/extracted_features_public_impl'     # Extract features输出位置 to this directory
+feature_extract_dir = '/home/ps/_lzj/GCD/code/store/osr_novel_categories/extracted_features_public_impl'     # Extract features输出位置 to this directory
 # -----------------
 # OTHER PATHS
 # -----------------
