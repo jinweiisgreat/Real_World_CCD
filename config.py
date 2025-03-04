@@ -1,7 +1,7 @@
 # -----------------
 # DATASET ROOTS
 # -----------------
-cifar_10_root = '/home/ps/_jinwei/Dataset/CIFAR/cifar-10'
+cifar_10_root = '/home/ps/_jinwei/Dataset/CIFAR/cifar10'
 cifar_100_root = '/home/ps/_jinwei/Dataset/CIFAR/cifar100'
 tiny_imagenet_root = '/home/ps/_jinwei/Dataset/TinyImageNet/'
 cub_root = '/home/ps/_jinwei/Dataset/CUB/'

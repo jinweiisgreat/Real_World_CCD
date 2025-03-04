@@ -15,7 +15,7 @@ from project_utils.general_utils import set_seed, init_experiment, AverageMeter
 from project_utils.cluster_and_log_utils import log_accs_from_preds
 
 from data.augmentations import get_transform
-from data.get_datasets_Original import get_class_splits, ContrastiveLearningViewGenerator, get_datasets
+from data.get_datasets import get_class_splits, ContrastiveLearningViewGenerator, get_datasets
 
 from models.utils_simgcd import DINOHead, get_params_groups, SupConLoss, info_nce_logits, DistillLoss
 from models.utils_simgcd_pro import get_kmeans_centroid_for_new_head
@@ -245,13 +245,6 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             # represent learning, unsup
             contrastive_logits, contrastive_labels = info_nce_logits(features=student_proj)
             contrastive_loss = torch.nn.CrossEntropyLoss()(contrastive_logits, contrastive_labels)
-            """
-            这段代码主要进行了以下几步操作：
-            1. 调用 `proto_aug_manager` 的方法计算一种基于难度感知的原型增强损失（proto aug hardness aware loss），结果存储在变量 `proto_aug_loss` 中，这部分损失用于度量增强过程中原型难易程度的变化。
-            2. 利用 `student` 网络的第一部分（通常对应于特征提取部分）对输入图片 `images` 进行前向传播，获得特征 `feats`，随后使用归一化操作（L2归一化）将特征向量的模长归一化，确保各特征值在相同尺度上进行比较。
-            3. 使用 `torch.no_grad()` 模式，通过 `student_pre` 网络的第一部分对同样的输入 `images` 进行特征提取，得到教师网络对应的特征 `feats_pre`，同时也对这些特征进行了归一化操作。这一过程不会计算梯度，以免影响模型参数更新。
-            4. 通过计算学生和教师网络归一化后特征的差的平方和，再除以特征数量，得到了特征蒸馏损失（feature distillation loss），该损失用于让学生网络在特征层面上模仿教师网络的输出，从而实现特征层面的知识迁移。
-            """
             proto_aug_loss = proto_aug_manager.compute_proto_aug_hardness_aware_loss(student)
             feats = student[0](images)
             feats = torch.nn.functional.normalize(feats, dim=-1)

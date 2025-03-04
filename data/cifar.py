@@ -136,7 +136,7 @@ def get_cifar_10_datasets(train_transform, test_transform, config_dict, train_cl
                             for targets in list(train_classes)]  # 7*5000   # NOTE!!!
 
     each_old_labeled_slices = [subsample_instances(samples, prop_indices_to_subsample=prop_train_labels)
-                               for samples in each_old_all_samples]  # 7*4000
+                               for samples in each_old_all_samples]  # 7*5000*0.8
 
     each_old_unlabeled_slices = [
         np.array(list(set(list(range(len(samples.targets)))) - set(each_old_labeled_slices[i])))
@@ -163,19 +163,18 @@ def get_cifar_10_datasets(train_transform, test_transform, config_dict, train_cl
 
     '''----------------------------- online old classes unlabeled samples ----------------------------------------------'''
     online_old_dataset_unlabelled_list = []
-    for s in range(continual_session_num):
+    for s in range(continual_session_num): # session:3
         # randomly sample old samples for each online session
         online_session_each_old_slices = [np.random.choice(np.array(list(range(len(samples.targets)))), online_old_seen_num, replace=False)
                                           for samples in each_old_unlabeled_samples]
         online_session_old_samples = [subsample_dataset(deepcopy(samples), online_session_each_old_slices[i])
-                                      for i, samples in enumerate(each_old_unlabeled_samples)]   # [2500, 2500, ...],  len=n
-
-        online_session_old_dataset = subDataset_wholeDataset(online_session_old_samples)
+                                      for i, samples in enumerate(each_old_unlabeled_samples)]
+        online_session_old_dataset = subDataset_wholeDataset(online_session_old_samples) # [1750,1750,1750] 250*7=1750
         online_old_dataset_unlabelled_list.append(online_session_old_dataset)
 
 
     '''---------------------------- online novel classes unlabeled samples ---------------------------------------------'''
-    novel_unlabelled_indices = set(whole_training_set.uq_idxs) - set(old_dataset_all.uq_idxs) #15000
+    novel_unlabelled_indices = set(whole_training_set.uq_idxs) - set(old_dataset_all.uq_idxs) # 15000 3*5000
     novel_dataset_unlabelled = subsample_dataset(deepcopy(whole_training_set),
                                                  np.array(list(novel_unlabelled_indices)))  # 15000
 
@@ -204,9 +203,9 @@ def get_cifar_10_datasets(train_transform, test_transform, config_dict, train_cl
                                                                          online_novel_unseen_num, replace=False))
 
         online_session_novel_samples = [subsample_dataset(deepcopy(samples), online_session_each_novel_slices[i])
-                                        for i, samples in enumerate(online_session_each_novel_samples)]   # [2500, 2500, ...],  len=n
+                                        for i, samples in enumerate(online_session_each_novel_samples)]
 
-        online_session_novel_dataset = subDataset_wholeDataset(online_session_novel_samples)
+        online_session_novel_dataset = subDataset_wholeDataset(online_session_novel_samples) # [4000,4250,4500] 4000;4000+1*250;4000+2*250
         online_novel_dataset_unlabelled_list.append(online_session_novel_dataset)
 
         # online session test dataset
@@ -219,8 +218,8 @@ def get_cifar_10_datasets(train_transform, test_transform, config_dict, train_cl
     all_datasets = {
         'offline_train_dataset': offline_train_dataset_samples,  # 28000
         'offline_test_dataset': offline_test_dataset,   # 7000
-        'online_old_dataset_unlabelled_list': online_old_dataset_unlabelled_list,  # list [1400, 1400, 1400]
-        'online_novel_dataset_unlabelled_list': online_novel_dataset_unlabelled_list,  # list: [4000,4200,4400]
+        'online_old_dataset_unlabelled_list': online_old_dataset_unlabelled_list, # list [1750, 1750, 1750]
+        'online_novel_dataset_unlabelled_list': online_novel_dataset_unlabelled_list,  # list: [4000,4250,4500]
         'online_test_dataset_list': online_test_dataset_list,  # list: [8000,9000,10000]
     }
 
@@ -274,12 +273,20 @@ def get_cifar_100_datasets(train_transform, test_transform, config_dict, train_c
     online_old_dataset_unlabelled_list = []
     for s in range(continual_session_num):
         # randomly sample old samples for each online session
+        """
+        遍历每个在线会话 s：
+            - 对于每个旧类未标记样本 each_old_unlabeled_samples，随机选择 online_old_seen_num 个样本索引。
+            - 使用这些索引从 each_old_unlabeled_samples 中子采样得到 online_session_old_samples。
+            - 将所有旧类的子采样样本合并成一个数据集 online_session_old_dataset。
+            - 将合并后的数据集添加到 online_old_dataset_unlabelled_list 中
+        """
         online_session_each_old_slices = [np.random.choice(np.array(list(range(len(samples.targets)))), online_old_seen_num, replace=False)
                                           for samples in each_old_unlabeled_samples]
         online_session_old_samples = [subsample_dataset(deepcopy(samples), online_session_each_old_slices[i])
-                                      for i, samples in enumerate(each_old_unlabeled_samples)]   # 80*50
+                                      for i, samples in enumerate(each_old_unlabeled_samples)]   # 80*50 (80 old classes， 50 samples per class)
 
         online_session_old_dataset = subDataset_wholeDataset(online_session_old_samples)
+        print(online_session_old_dataset.data.shape)
         online_old_dataset_unlabelled_list.append(online_session_old_dataset)
 
 
