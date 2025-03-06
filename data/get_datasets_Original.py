@@ -1,5 +1,5 @@
 """
-get_datasets 修改版：集成CLEAR数据集
+get_datasets 原版
 2025_2_23
 author: wei jin
 """
@@ -18,8 +18,6 @@ from data.imagenet import get_imagenet_100_datasets
 from data.cub import get_cub_datasets
 from data.fgvc_aircraft import get_aircraft_datasets
 from data.stanford_cars import get_scars_datasets
-# 导入CLEAR数据集实现
-from data.clear import get_clear_10_datasets, subsample_classes as subsample_dataset_clear
 
 from data.cifar import subsample_classes as subsample_dataset_cifar
 from data.tiny_imagenet import subsample_classes as subsample_dataset_tiny_imagenet
@@ -39,7 +37,6 @@ sub_sample_class_funcs = {
     'cub': subsample_dataset_cub,
     'aircraft': subsample_dataset_aircraft,
     'scars': subsample_dataset_scars,
-    'clear10': subsample_dataset_clear,  # 添加CLEAR10
 }
 
 get_dataset_funcs = {
@@ -50,7 +47,6 @@ get_dataset_funcs = {
     'cub': get_cub_datasets,
     'aircraft': get_aircraft_datasets,
     'scars': get_scars_datasets,
-    'clear10': get_clear_10_datasets,  # 添加CLEAR10
 }
 
 
