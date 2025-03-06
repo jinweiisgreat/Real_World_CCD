@@ -12,16 +12,16 @@ from collections import defaultdict
 clear_root = '~/Dataset/CLEAR/CLEAR10_restructured'  # 修改为您的CLEAR数据集路径
 
 # 默认配置
-dataset_split_config_dict = {
-    'clear10': {
-        'offline_old_cls_num': 7,  # 离线阶段已知类别数
-        'offline_prop_train_labels': 1.0,  # 离线阶段标记数据比例
-        'continual_session_num': 3,  # 持续学习阶段数
-        'online_novel_unseen_num': 480,  # 每个新类别样本数
-        'online_old_seen_num': 40,  # 每个已知类别样本数
-        'online_novel_seen_num': 50,  # 每个已见过新类别样本数
-    }
-}
+# dataset_split_config_dict = {
+#     'clear10': {
+#         'offline_old_cls_num': 7,  # 离线阶段已知类别数
+#         'offline_prop_train_labels': 1.0,  # 离线阶段标记数据比例
+#         'continual_session_num': 3,  # 持续学习阶段数
+#         'online_novel_unseen_num': 480,  # 每个新类别样本数
+#         'online_old_seen_num': 40,  # 每个已知类别样本数
+#         'online_novel_seen_num': 50,  # 每个已见过新类别样本数
+#     }
+# }
 
 # 类别名称映射(用于加载数据)
 class_names = ["baseball", "bus", "camera", "cosplay", "dress",
@@ -324,44 +324,44 @@ def get_clear_10_datasets(train_transform, test_transform, config_dict, train_cl
     return all_datasets, novel_classes
 
 
-def get_transform():
-    """获取标准的图像转换"""
-    train_transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
+# def get_transform():
+#     """获取标准的图像转换"""
+#     train_transform = transforms.Compose([
+#         transforms.Resize((224, 224)),
+#         transforms.RandomHorizontalFlip(),
+#         transforms.ToTensor(),
+#         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+#     ])
+#
+#     test_transform = transforms.Compose([
+#         transforms.Resize((224, 224)),
+#         transforms.ToTensor(),
+#         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+#     ])
+#
+#     return train_transform, test_transform
 
-    test_transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
 
-    return train_transform, test_transform
-
-
-if __name__ == '__main__':
-    # 示例用法
-    train_transform, test_transform = get_transform()
-
-    datasets, novel_classes = get_clear_10_datasets(
-        train_transform=train_transform,
-        test_transform=test_transform,
-        config_dict=dataset_split_config_dict['clear10'],
-        train_classes=range(7),  # 前7个类别作为已知类别
-        prop_train_labels=1.0,
-        is_shuffle=True,
-        seed=42
-    )
-
-    # 打印数据集信息
-    print(f"离线训练集样本数: {len(datasets['offline_train_dataset'])}")
-    print(f"离线测试集样本数: {len(datasets['offline_test_dataset'])}")
-
-    for i in range(3):
-        print(f"\nSession {i + 1}:")
-        print(f"  已知类别样本数: {len(datasets['online_old_dataset_unlabelled_list'][i])}")
-        print(f"  新类别样本数: {len(datasets['online_novel_dataset_unlabelled_list'][i])}")
-        print(f"  测试集样本数: {len(datasets['online_test_dataset_list'][i])}")
+# if __name__ == '__main__':
+#     # 示例用法
+#     train_transform, test_transform = get_transform()
+#
+#     datasets, novel_classes = get_clear_10_datasets(
+#         train_transform=train_transform,
+#         test_transform=test_transform,
+#         config_dict=dataset_split_config_dict['clear10'],
+#         train_classes=range(7),  # 前7个类别作为已知类别
+#         prop_train_labels=1.0,
+#         is_shuffle=True,
+#         seed=42
+#     )
+#
+#     # 打印数据集信息
+#     print(f"离线训练集样本数: {len(datasets['offline_train_dataset'])}")
+#     print(f"离线测试集样本数: {len(datasets['offline_test_dataset'])}")
+#
+#     for i in range(3):
+#         print(f"\nSession {i + 1}:")
+#         print(f"  已知类别样本数: {len(datasets['online_old_dataset_unlabelled_list'][i])}")
+#         print(f"  新类别样本数: {len(datasets['online_novel_dataset_unlabelled_list'][i])}")
+#         print(f"  测试集样本数: {len(datasets['online_test_dataset_list'][i])}")
