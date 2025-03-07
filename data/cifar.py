@@ -273,13 +273,6 @@ def get_cifar_100_datasets(train_transform, test_transform, config_dict, train_c
     online_old_dataset_unlabelled_list = []
     for s in range(continual_session_num):
         # randomly sample old samples for each online session
-        """
-        遍历每个在线会话 s：
-            - 对于每个旧类未标记样本 each_old_unlabeled_samples，随机选择 online_old_seen_num 个样本索引。
-            - 使用这些索引从 each_old_unlabeled_samples 中子采样得到 online_session_old_samples。
-            - 将所有旧类的子采样样本合并成一个数据集 online_session_old_dataset。
-            - 将合并后的数据集添加到 online_old_dataset_unlabelled_list 中
-        """
         online_session_each_old_slices = [np.random.choice(np.array(list(range(len(samples.targets)))), online_old_seen_num, replace=False)
                                           for samples in each_old_unlabeled_samples]
         online_session_old_samples = [subsample_dataset(deepcopy(samples), online_session_each_old_slices[i])

@@ -19,7 +19,7 @@ from data.cub import get_cub_datasets
 from data.fgvc_aircraft import get_aircraft_datasets
 from data.stanford_cars import get_scars_datasets
 # 导入CLEAR数据集实现
-from data.clear import get_clear_10_datasets, subsample_classes as subsample_dataset_clear
+from data.clear import get_clear_10_datasets as subsample_dataset_clear
 
 from data.cifar import subsample_classes as subsample_dataset_cifar
 from data.tiny_imagenet import subsample_classes as subsample_dataset_tiny_imagenet
