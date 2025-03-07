@@ -174,9 +174,6 @@ def get_class_splits(args):
 
     # ----------------------------------------------------------------------
 
-
-
-
     elif args.dataset_name == 'tiny_imagenet':
 
         args.image_size = 64
