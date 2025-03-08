@@ -19,7 +19,7 @@ from data.cub import get_cub_datasets
 from data.fgvc_aircraft import get_aircraft_datasets
 from data.stanford_cars import get_scars_datasets
 # 导入CLEAR数据集实现
-from data.clear import get_clear_10_datasets as subsample_dataset_clear
+from data.clear import get_clear_datasets
 
 from data.cifar import subsample_classes as subsample_dataset_cifar
 from data.tiny_imagenet import subsample_classes as subsample_dataset_tiny_imagenet
@@ -27,6 +27,8 @@ from data.imagenet import subsample_classes as subsample_dataset_imagenet
 from data.cub import subsample_classes as subsample_dataset_cub
 from data.fgvc_aircraft import subsample_classes as subsample_dataset_aircraft
 from data.stanford_cars import subsample_classes as subsample_dataset_scars
+
+from data.clear import subsample_classes as subsample_dataset_clear
 
 from config import osr_split_dir
 
@@ -50,7 +52,7 @@ get_dataset_funcs = {
     'cub': get_cub_datasets,
     'aircraft': get_aircraft_datasets,
     'scars': get_scars_datasets,
-    'clear10': get_clear_10_datasets,  # 添加CLEAR10
+    'clear10': get_clear_datasets,  # 添加CLEAR10
 }
 
 
