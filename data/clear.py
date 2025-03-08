@@ -1,360 +1,268 @@
+from PIL import Image
 import os
-import pandas as pd
 import numpy as np
 from copy import deepcopy
-
-from torchvision.datasets.folder import default_loader
 from torch.utils.data import Dataset
+from data.data_utils import subsample_instances
+from config import clear_10_root
 
-# --------------------- #
-# 1) 数据加载类 (模仿 CustomCub2011)
-# --------------------- #
-class CustomCLEAR10(Dataset):
-    """
-    示例：用于加载 CLEAR10 数据集的 Dataset，与 CustomCub2011 结构相似。
-    假设数据目录结构:
-        root/
-          train/
-            1/<class_name>/*.jpg
-            2/<class_name>/*.jpg
-            3/<class_name>/*.jpg
-            4/<class_name>/*.jpg
-          test/
-            1/<class_name>/*.jpg
-            2/<class_name>/*.jpg
-            3/<class_name>/*.jpg
-            4/<class_name>/*.jpg
-    """
-    base_folder = None   # 不一定需要
-    url = None           # 如无下载链接，可留空
-    filename = None
-    tgz_md5 = None
 
-    def __init__(self,
-                 root,
-                 train=True,
-                 transform=None,
-                 target_transform=None,
-                 loader=default_loader,
-                 download=False):
-        """
-        :param root: 根目录。例如 /path/to/CLEAR10
-        :param train: 是否是训练集 (True/False)
-        :param transform: 图像变换
-        :param target_transform: 标签变换
-        :param loader: 用于加载图像的函数
-        :param download: 如需要在线下载可实现; 否则忽略
-        """
-        self.root = os.path.expanduser(root)
+class CustomCLEAR10Dataset(Dataset):
+    """
+    自定义CLEAR10数据集类，用于支持唯一索引和域信息
+    """
+
+    def __init__(self, root=None, transform=None, data=None, targets=None, domain=None):
+        self.root = root
         self.transform = transform
-        self.target_transform = target_transform
-        self.loader = loader
-        self.train = train
+        self.domain = domain
 
-        if download:
-            self._download()
+        # 如果直接提供了数据和标签
+        if data is not None and targets is not None:
+            self.data = data
+            self.targets = targets
+            self.uq_idxs = np.array(range(len(self.targets)))
+            return
 
-        if not self._check_integrity():
-            raise RuntimeError('CLEAR10 dataset not found or corrupted. '
-                               'Please verify your dataset path.')
+        # 从文件系统加载数据
+        self.data = []
+        self.targets = []
 
-        # 创建索引并加载元数据
-        self._load_metadata()
-        # 记下 [0..N-1] 的唯一索引
-        self.uq_idxs = np.array(range(len(self)))
+        # 遍历指定域文件夹下的所有类别
+        domain_path = os.path.join(root, str(domain))
+        for class_id, class_name in enumerate(sorted(os.listdir(domain_path))):
+            class_path = os.path.join(domain_path, class_name)
+            if os.path.isdir(class_path):
+                for img_name in os.listdir(class_path):
+                    if img_name.endswith(('.jpg', '.png', '.jpeg')):
+                        img_path = os.path.join(class_path, img_name)
+                        self.data.append(img_path)  # 存储图片路径
+                        self.targets.append(class_id)
 
-    def _load_metadata(self):
-        """
-        目标：构建 self.data (pandas DataFrame)，
-             包含至少: [img_path, target] 以及是否训练/测试等信息
-        """
-        # train or test
-        split_folder = 'train' if self.train else 'test'
-        data_records = []
+        self.targets = np.array(self.targets)
+        self.uq_idxs = np.array(range(len(self.targets)))
 
-        # 假设有 4 个分桶: 1, 2, 3, 4
-        # 如果您只想在离线阶段拿 1 号桶，也可在后续 pipeline 再做过滤
-        bucket_ids = [1, 2, 3, 4]
+    def __getitem__(self, item):
+        if isinstance(self.data[item], str):  # 如果是路径
+            img = Image.open(self.data[item]).convert('RGB')
+        else:  # 如果是已加载的图像
+            img = self.data[item]
 
-        # 这里给出10个类别名称的示例（可以根据自己文件夹名称进行修改）
-        clear10_classes = [
-            "baseball", "bus", "camera", "cosplay", "dress",
-            "hockey",   "laptop", "racing", "soccer", "sweater"
-        ]
-        class_to_label = {cls_name: i for i, cls_name in enumerate(clear10_classes)}
-
-        for bucket_id in bucket_ids:
-            bucket_str = str(bucket_id)
-            bucket_path = os.path.join(self.root, split_folder, bucket_str)
-            if not os.path.isdir(bucket_path):
-                # 若该桶不存在，可跳过 或 raise 警告
-                continue
-
-            # 遍历bucket_path下的所有子文件夹(类)
-            for cls_name in os.listdir(bucket_path):
-                cls_dir = os.path.join(bucket_path, cls_name)
-                if not os.path.isdir(cls_dir):
-                    continue
-
-                label = class_to_label.get(cls_name, None)
-                if label is None:
-                    # 未知类别，可根据需求做处理
-                    continue
-
-                # 扫描该类别文件夹下的所有jpg/png
-                for fname in os.listdir(cls_dir):
-                    fpath = os.path.join(cls_dir, fname)
-                    if not (fname.lower().endswith('.jpg') or fname.lower().endswith('.png')):
-                        continue
-
-                    # 记录: 图像路径, 类别(0~9), 以及桶ID等信息
-                    data_records.append({
-                        'img_path': fpath,
-                        'target': label,
-                        'bucket': bucket_id
-                    })
-
-        # 转成 pandas DataFrame, 类似 cub.py 里的 self.data
-        self.data = pd.DataFrame(data_records)
-
-    def _check_integrity(self):
-        # 如无校验需求，这里直接返回 True 即可
-        # 也可做一些简单的路径检查
-        return True
-
-    def _download(self):
-        # CLEAR10 若无官方 tar 包下载，可不实现
-        pass
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        """
-        返回 (image, target, uq_idx)
-        与 cub.py 保持同样的三元组格式。
-        """
-        record = self.data.iloc[idx]
-        img_path = record['img_path']
-        target = record['target']
-        img = self.loader(img_path)  # default_loader默认调用 PIL.Image.open
+        label = self.targets[item]
 
         if self.transform is not None:
             img = self.transform(img)
-        if self.target_transform is not None:
-            target = self.target_transform(target)
 
-        return img, target, self.uq_idxs[idx]
+        uq_idx = self.uq_idxs[item]
+
+        return img, label, uq_idx
+
+    def __len__(self):
+        return len(self.targets)
 
 
-# --------------------- #
-# 2) 工具函数 (与 cub.py 对齐)
-# --------------------- #
 def subsample_dataset(dataset, idxs):
     """
-    根据给定索引 idxs 对 dataset.data 和 dataset.uq_idxs 做过滤。
+    基于索引子采样数据集
     """
-    mask = np.zeros(len(dataset), dtype=bool)
-    mask[idxs] = True
+    if len(idxs) > 0:
+        new_dataset = deepcopy(dataset)
+        new_dataset.data = [new_dataset.data[i] for i in idxs]
+        new_dataset.targets = new_dataset.targets[idxs]
+        new_dataset.uq_idxs = new_dataset.uq_idxs[idxs]
+        return new_dataset
+    else:
+        return None
 
-    dataset.data = dataset.data[mask].reset_index(drop=True)
-    dataset.uq_idxs = dataset.uq_idxs[mask]
 
-    return dataset
-
-
-def subsample_classes(dataset, include_classes=range(7)):
+def subsample_classes(dataset, include_classes=(0, 1, 2, 3, 4, 5, 6)):
     """
-    只保留 include_classes 里的类别样本，
-    并把它们的标签重新映射到连续 [0..len(include_classes)-1] 区间。
+    仅保留特定类别的样本
     """
-    include_classes = list(include_classes)
-    cls_idxs = [i for i, row in dataset.data.iterrows() if row['target'] in include_classes]
+    cls_idxs = [x for x, t in enumerate(dataset.targets) if t in include_classes]
 
-    dataset = subsample_dataset(dataset, cls_idxs)
-
-    # 类别映射
     target_xform_dict = {}
-    for i, old_cls in enumerate(include_classes):
-        target_xform_dict[old_cls] = i
+    for i, k in enumerate(include_classes):
+        target_xform_dict[k] = i
 
-    dataset.target_transform = lambda x: target_xform_dict[x]
+    dataset = subsample_dataset(dataset, np.array(cls_idxs))
 
     return dataset
 
 
 def subDataset_wholeDataset(datalist):
     """
-    把 datalist 里若干子数据集的 DataFrame 和 uq_idxs 拼接起来，
-    返回一个新的大 dataset。
+    将多个数据集合并为一个
     """
-    from copy import deepcopy
-    if len(datalist) == 0:
+    if not datalist:
         return None
+
     wholeDataset = deepcopy(datalist[0])
-    # pandas concat
-    frames = [d.data for d in datalist]
-    wholeDataset.data = pd.concat(frames, axis=0, ignore_index=True)
-    # uq_idxs
-    all_uq_idxs = [d.uq_idxs for d in datalist]
-    wholeDataset.uq_idxs = np.concatenate(all_uq_idxs)
+
+    if isinstance(wholeDataset.data[0], str):  # 图片路径
+        wholeDataset.data = []
+        for d in datalist:
+            wholeDataset.data.extend(d.data)
+    else:  # 已加载的图像
+        all_data = []
+        for d in datalist:
+            all_data.extend(d.data)
+        wholeDataset.data = all_data
+
+    wholeDataset.targets = np.concatenate([d.targets for d in datalist], axis=0)
+    wholeDataset.uq_idxs = np.concatenate([d.uq_idxs for d in datalist], axis=0)
+
     return wholeDataset
 
 
-def get_train_val_indices(train_dataset, val_split=0.2):
+def get_clear_10_datasets(train_transform, test_transform, config_dict,
+                          train_classes=(0, 1, 2, 3, 4, 5, 6),
+                          novel_classes=(7, 8, 9),
+                          split_train_val=False, is_shuffle=False, seed=0):
     """
-    与 cub.py 类似，对 train_dataset 按类别分割出 train/val 索引
+    为CLEAR10数据集创建适用于Continual-GCD的数据加载器
+
+    参数:
+    - train_transform: 训练集变换
+    - test_transform: 测试集变换
+    - config_dict: 配置字典
+    - train_classes: 初始训练类别索引(0-6)
+    - novel_classes: 增量学习类别索引(7-9)
+    - split_train_val: 是否分割训练和验证集
+    - is_shuffle: 是否打乱新类顺序
+    - seed: 随机种子
+
+    返回:
+    - 适用于Happy框架的数据集字典
     """
-    train_classes = np.unique(train_dataset.data['target'])
-
-    train_idxs = []
-    val_idxs = []
-    for cls in train_classes:
-        cls_idxs = np.where(train_dataset.data['target'] == cls)[0]
-        val_count = int(val_split * len(cls_idxs))
-        v_ = np.random.choice(cls_idxs, replace=False, size=val_count)
-        t_ = [x for x in cls_idxs if x not in v_]
-        train_idxs.extend(t_)
-        val_idxs.extend(v_)
-
-    return train_idxs, val_idxs
-
-
-# --------------------- #
-# 3) 示例：get_clear_datasets
-# --------------------- #
-def get_clear_datasets(train_transform,
-                       test_transform,
-                       config_dict,
-                       old_classes=range(7),
-                       prop_train_labels=0.8,
-                       is_shuffle=False,
-                       seed=0):
-    """
-    这里示例把 CLEAR10 做成 CGCD 形式，模仿 get_cub_datasets。
-    假设:
-      - old_classes=range(7) 代表初始 7 个旧类(0~6)
-      - 其余的 3 个类(7,8,9) 依次在多个 Session 中引入
-      - config_dict 里可能包含:
-          config_dict['continual_session_num'] = 3
-          config_dict['online_novel_unseen_num'] = 600  # 每次新类出现时抽多少(示例)
-          config_dict['online_old_seen_num'] = 40       # 每次旧类抽多少(示例)
-          config_dict['online_novel_seen_num'] = 40     # 对已见新类再出现时抽多少(示例)
-    """
-    # 读取重要字段
+    # 配置在线会话参数
     continual_session_num = config_dict.get('continual_session_num', 3)
-    online_novel_unseen_num = config_dict.get('online_novel_unseen_num', 600)
-    online_old_seen_num     = config_dict.get('online_old_seen_num', 40)
-    online_novel_seen_num   = config_dict.get('online_novel_seen_num', 40)
 
-    # 1) 初始化整个训练集(含全部桶)
-    whole_train = CustomCLEAR10(root=config_dict['clear_root'],
-                                train=True,
-                                transform=train_transform,
-                                download=False)
-
-    # 2) 抽取旧类: 先保留 old_classes
-    old_dataset_all = subsample_classes(deepcopy(whole_train), include_classes=old_classes)
-
-    # 类别内再拆分: 80%有标签 / 20%无标签
-    from data.data_utils import subsample_instances
-    each_old_all_samples = [
-        subsample_classes(deepcopy(old_dataset_all), include_classes=[c])
-        for c in old_classes
-    ]
-    each_old_labeled_slices = [
-        subsample_instances(ds, prop_indices_to_subsample=prop_train_labels)
-        for ds in each_old_all_samples
-    ]
-    each_old_unlabeled_slices = [
-        np.array(list(set(range(len(ds.data))) - set(each_old_labeled_slices[i])))
-        for i, ds in enumerate(each_old_all_samples)
-    ]
-    each_old_labeled_samples = [
-        subsample_dataset(deepcopy(ds), each_old_labeled_slices[i])
-        for i, ds in enumerate(each_old_all_samples)
-    ]
-    each_old_unlabeled_samples = [
-        subsample_dataset(deepcopy(ds), each_old_unlabeled_slices[i])
-        for i, ds in enumerate(each_old_all_samples)
-    ]
-
-    # 把所有旧类的 labeled 样本拼成 offline train
-    offline_train_dataset = subDataset_wholeDataset(each_old_labeled_samples)
-
-    # 对应 offline test dataset (假设只测旧类)
-    whole_test = CustomCLEAR10(root=config_dict['clear_root'],
-                               train=False,
-                               transform=test_transform)
-    offline_test_dataset = subsample_classes(deepcopy(whole_test), include_classes=old_classes)
-
-    # 3) 为 online old classes 的无标签数据准备多个会话
-    online_old_dataset_unlabelled_list = []
-    for s in range(continual_session_num):
-        # 从 each_old_unlabeled_samples 里抽 offline_old_seen_num
-        session_old_samples_list = []
-        for ds in each_old_unlabeled_samples:
-            idxs_ = np.random.choice(len(ds.data), size=online_old_seen_num, replace=False)
-            session_old_samples_list.append(subsample_dataset(deepcopy(ds), idxs_))
-
-        session_old_dataset = subDataset_wholeDataset(session_old_samples_list)
-        online_old_dataset_unlabelled_list.append(session_old_dataset)
-
-    # 4) 剩余类别(假设 range(10) 中去掉 0~6 => 7,8,9) 为 novel
-    all_novel = set(range(10)) - set(old_classes)  # 7,8,9
-    novel_dataset_unlabelled = subsample_classes(deepcopy(whole_train), include_classes=all_novel)
-
-    novel_labels = np.unique(novel_dataset_unlabelled.data['target'])
-    # 如果需要随机顺序
-    if is_shuffle:
+    # 使用指定的random seed
+    if seed is not None:
         np.random.seed(seed)
-        np.random.shuffle(novel_labels)
 
+    # ===========================================
+    # 1. 离线阶段 - 文件夹1前7个类
+    # ===========================================
+
+    # 加载文件夹1的训练数据
+    domain1_train_dataset = CustomCLEAR10Dataset(
+        root=os.path.join(clear_10_root, 'train'),
+        transform=train_transform,
+        domain=1
+    )
+
+    # 提取前7个类作为训练数据
+    offline_train_dataset = subsample_classes(
+        deepcopy(domain1_train_dataset),
+        include_classes=train_classes
+    )
+
+    # 加载测试集 - 文件夹1
+    test_dataset_full = CustomCLEAR10Dataset(
+        root=os.path.join(clear_10_root, 'test'),
+        transform=test_transform,
+        domain=1
+    )
+
+    # 离线测试集 - 只包含7个旧类
+    offline_test_dataset = subsample_classes(
+        deepcopy(test_dataset_full),
+        include_classes=train_classes
+    )
+
+    # ===========================================
+    # 2. 在线增量阶段
+    # ===========================================
+
+    # 每个会话的新类映射
+    session_novel_class_map = {
+        0: [novel_classes[0]],  # Session 1: racing
+        1: [novel_classes[0], novel_classes[1]],  # Session 2: racing, soccer
+        2: novel_classes  # Session 3: racing, soccer, sweater
+    }
+
+    # 创建在线会话数据集
+    online_old_dataset_unlabelled_list = []
     online_novel_dataset_unlabelled_list = []
     online_test_dataset_list = []
 
-    # 如果要平均分配 novel 到 sessions，
-    # 这里做个简单示例: 3 个类 => 3 个 session, 每个 session 引入一个类
-    # (若实际有更多类, 需做更灵活的分配)
-    novel_labels = list(novel_labels)  # e.g. [7,8,9]
-    if len(novel_labels) < continual_session_num:
-        print("Warning: novel类数量少于session数，可能需要调整策略")
+    for session in range(continual_session_num):
+        domain_id = session + 2  # 会话1对应文件夹2，依此类推
 
-    # session i 要引入 novel_labels[i]
-    for s in range(continual_session_num):
-        current_novel = novel_labels[s] if s < len(novel_labels) else None
-        # 构建 session s 的 novel 样本
-        if current_novel is not None:
-            ds_novel_single = subsample_classes(deepcopy(novel_dataset_unlabelled), include_classes=[current_novel])
-            # 如果是第一次出现 => unseen_num
-            # 若后面再次出现 => seen_num
-            if s == 0:
-                chosen_idx = np.random.choice(len(ds_novel_single.data), online_novel_unseen_num, replace=False)
+        # 当前会话需要使用的所有类别
+        current_novel_classes = session_novel_class_map[session]
+
+        # 加载当前域的训练数据
+        domain_train_dataset = CustomCLEAR10Dataset(
+            root=os.path.join(clear_10_root, 'train'),
+            transform=train_transform,
+            domain=domain_id
+        )
+
+        # 1. 提取旧类样本
+        old_classes_dataset = subsample_classes(
+            deepcopy(domain_train_dataset),
+            include_classes=train_classes
+        )
+
+        # 为每个旧类随机选择40个样本
+        old_samples_list = []
+        for cls in train_classes:
+            cls_idxs = np.where(old_classes_dataset.targets == cls)[0]
+            if len(cls_idxs) > 40:
+                selected_idxs = np.random.choice(cls_idxs, 40, replace=False)
+                old_samples_list.append(subsample_dataset(deepcopy(old_classes_dataset), selected_idxs))
             else:
-                chosen_idx = np.random.choice(len(ds_novel_single.data), online_novel_seen_num, replace=False)
-            ds_novel_single = subsample_dataset(ds_novel_single, chosen_idx)
-        else:
-            # 没有更多新类可以引入
-            ds_novel_single = None
+                old_samples_list.append(subsample_dataset(deepcopy(old_classes_dataset), cls_idxs))
 
-        # 拼成一个 dataset
-        if ds_novel_single is not None:
-            session_novel_dataset = ds_novel_single
-        else:
-            # 如果没有新类，则返回空 dataset
-            session_novel_dataset = None
+        # 合并所有旧类样本
+        session_old_dataset = subDataset_wholeDataset(old_samples_list)
 
-        # 收集
+        # 2. 提取新类样本
+        novel_samples_list = []
+
+        for i, novel_cls in enumerate(current_novel_classes):
+            # 筛选出该类别的所有样本
+            novel_cls_dataset = subsample_classes(
+                deepcopy(domain_train_dataset),
+                include_classes=[novel_cls]
+            )
+
+            # 依据类别在当前会话中的状态决定采样数量
+            if novel_cls == novel_classes[session]:  # 当前会话的新类
+                sample_count = 200
+            else:  # 已见过的新类
+                sample_count = 50
+
+            cls_idxs = np.where(novel_cls_dataset.targets == novel_cls)[0]
+            if len(cls_idxs) > sample_count:
+                selected_idxs = np.random.choice(cls_idxs, sample_count, replace=False)
+                novel_samples_list.append(subsample_dataset(deepcopy(novel_cls_dataset), selected_idxs))
+            else:
+                novel_samples_list.append(subsample_dataset(deepcopy(novel_cls_dataset), cls_idxs))
+
+        # 合并所有新类样本
+        session_novel_dataset = subDataset_wholeDataset(novel_samples_list)
+
+        # 添加到会话列表
+        online_old_dataset_unlabelled_list.append(session_old_dataset)
         online_novel_dataset_unlabelled_list.append(session_novel_dataset)
 
-        # session 的测试集: 旧类 + 目前出现过的新类
-        # 目前出现过的新类 => novel_labels[:s+1]
-        seen_novel_so_far = novel_labels[:s+1]
-        session_test_classes = list(old_classes) + list(seen_novel_so_far)
-        session_test = subsample_classes(deepcopy(whole_test), include_classes=session_test_classes)
-        online_test_dataset_list.append(session_test)
+        # 3. 创建当前会话的测试集
+        # 包含旧类和当前所有出现过的新类
+        test_classes = list(train_classes) + current_novel_classes
+        session_test_dataset = subsample_classes(
+            deepcopy(test_dataset_full),
+            include_classes=test_classes
+        )
+        online_test_dataset_list.append(session_test_dataset)
 
-    # 最终打包
+    # ===========================================
+    # 3. 组织返回结果
+    # ===========================================
+
     all_datasets = {
         'offline_train_dataset': offline_train_dataset,
         'offline_test_dataset': offline_test_dataset,
@@ -363,4 +271,44 @@ def get_clear_datasets(train_transform,
         'online_test_dataset_list': online_test_dataset_list,
     }
 
-    return all_datasets
+    # 如果需要打乱类别顺序
+    if is_shuffle:
+        novel_targets_shuffle = list(novel_classes)
+        np.random.shuffle(novel_targets_shuffle)
+    else:
+        novel_targets_shuffle = list(novel_classes)
+
+    return all_datasets, novel_targets_shuffle
+
+
+# 测试代码，使用时请注释掉
+"""
+if __name__ == '__main__':
+    clear_10_root = '/path/to/CLEAR10_CGCD'
+    config_dict = {
+        'continual_session_num': 3,
+        'online_novel_unseen_num': 200,
+        'online_old_seen_num': 40,
+        'online_novel_seen_num': 50
+    }
+
+    datasets, novel_shuffle = get_clear_10_datasets(
+        train_transform=None, 
+        test_transform=None,
+        config_dict=config_dict,
+        train_classes=(0, 1, 2, 3, 4, 5, 6),
+        novel_classes=(7, 8, 9)
+    )
+
+    print("Offline train dataset size:", len(datasets['offline_train_dataset']))
+    print("Offline test dataset size:", len(datasets['offline_test_dataset']))
+
+    for i, dataset in enumerate(datasets['online_old_dataset_unlabelled_list']):
+        print(f"Session {i+1} old dataset size:", len(dataset))
+
+    for i, dataset in enumerate(datasets['online_novel_dataset_unlabelled_list']):
+        print(f"Session {i+1} novel dataset size:", len(dataset))
+
+    for i, dataset in enumerate(datasets['online_test_dataset_list']):
+        print(f"Session {i+1} test dataset size:", len(dataset))
+"""
