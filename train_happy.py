@@ -379,7 +379,7 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', default=128, type=int)
     parser.add_argument('--num_workers', default=4, type=int)
     parser.add_argument('--num_workers_test', default=4, type=int)
-    parser.add_argument('--eval_funcs', nargs='+', help='Which eval functions to use', default='v2')
+    parser.add_argument('--eval_funcs', nargs='+', help='Which eval functions to use', default=['v2'])
 
     parser.add_argument('--dataset_name', type=str, default='cifar100', help='options: cifar10, cifar100, tiny_imagenet, cub, imagenet_100')
     parser.add_argument('--use_ssb_splits', action='store_true', default=True)
@@ -427,7 +427,7 @@ if __name__ == "__main__":
     parser.add_argument('--load_offline_id', type=str, default=None)
     parser.add_argument('--epochs_offline', default=100, type=int)
     parser.add_argument('--epochs_online_per_session', default=30, type=int)
-    parser.add_argument('--continual_session_num', default=4, type=int)
+    parser.add_argument('--continual_session_num', default=3, type=int)
     parser.add_argument('--online_novel_unseen_num', default=400, type=int)
     parser.add_argument('--online_old_seen_num', default=50, type=int)
     parser.add_argument('--online_novel_seen_num', default=50, type=int)

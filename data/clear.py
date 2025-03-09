@@ -115,9 +115,10 @@ def subDataset_wholeDataset(datalist):
     return wholeDataset
 
 
-def get_clear_10_datasets(train_transform, test_transform, config_dict,
+def get_clear_datasets(train_transform, test_transform, config_dict,
                           train_classes=(0, 1, 2, 3, 4, 5, 6),
                           novel_classes=(7, 8, 9),
+                          prop_train_labels=1.0,
                           split_train_val=False, is_shuffle=False, seed=0):
     """
     为CLEAR10数据集创建适用于Continual-GCD的数据加载器
@@ -180,7 +181,7 @@ def get_clear_10_datasets(train_transform, test_transform, config_dict,
     session_novel_class_map = {
         0: [novel_classes[0]],  # Session 1: racing
         1: [novel_classes[0], novel_classes[1]],  # Session 2: racing, soccer
-        2: novel_classes  # Session 3: racing, soccer, sweater
+        2: list(novel_classes)  # Session 3: racing, soccer, sweater
     }
 
     # 创建在线会话数据集
@@ -232,9 +233,9 @@ def get_clear_10_datasets(train_transform, test_transform, config_dict,
 
             # 依据类别在当前会话中的状态决定采样数量
             if novel_cls == novel_classes[session]:  # 当前会话的新类
-                sample_count = 200
+                sample_count = config_dict['online_novel_unseen_num']
             else:  # 已见过的新类
-                sample_count = 50
+                sample_count = config_dict['online_novel_seen_num']
 
             cls_idxs = np.where(novel_cls_dataset.targets == novel_cls)[0]
             if len(cls_idxs) > sample_count:
@@ -282,33 +283,77 @@ def get_clear_10_datasets(train_transform, test_transform, config_dict,
 
 
 # 测试代码，使用时请注释掉
-"""
+
 if __name__ == '__main__':
-    clear_10_root = '/path/to/CLEAR10_CGCD'
+    clear_10_root = '/home/ps/_jinwei/Dataset/CLEAR/CLEAR10_CGCD'
     config_dict = {
         'continual_session_num': 3,
-        'online_novel_unseen_num': 200,
+        'online_novel_unseen_num': 600,
         'online_old_seen_num': 40,
         'online_novel_seen_num': 50
     }
 
-    datasets, novel_shuffle = get_clear_10_datasets(
-        train_transform=None, 
+    # 类别索引到名称的映射
+    class_names = {
+        0: 'baseball',
+        1: 'bus',
+        2: 'camera',
+        3: 'cosplay',
+        4: 'dress',
+        5: 'hockey',
+        6: 'laptop',
+        7: 'racing',
+        8: 'soccer',
+        9: 'sweater'
+    }
+
+    train_classes = (0, 1, 2, 3, 4, 5, 6)
+    novel_classes = (7, 8, 9)
+
+    datasets, novel_shuffle = get_clear_datasets(
+        train_transform=None,
         test_transform=None,
         config_dict=config_dict,
-        train_classes=(0, 1, 2, 3, 4, 5, 6),
-        novel_classes=(7, 8, 9)
+        train_classes=train_classes,
+        novel_classes=novel_classes
     )
 
     print("Offline train dataset size:", len(datasets['offline_train_dataset']))
+    print("Offline train classes:", [class_names[i] for i in train_classes])
     print("Offline test dataset size:", len(datasets['offline_test_dataset']))
+    print("Offline test classes:", [class_names[i] for i in train_classes])
+
+    # 每个会话的新类映射
+    session_novel_class_map = {
+        0: [novel_classes[0]],  # Session 1: racing
+        1: [novel_classes[0], novel_classes[1]],  # Session 2: racing, soccer
+        2: list(novel_classes)  # Session 3: racing, soccer, sweater
+    }
 
     for i, dataset in enumerate(datasets['online_old_dataset_unlabelled_list']):
-        print(f"Session {i+1} old dataset size:", len(dataset))
+        print(f"Session {i + 1} old dataset size:", len(dataset))
+        print(f"Session {i + 1} old classes:", [class_names[c] for c in train_classes])
 
     for i, dataset in enumerate(datasets['online_novel_dataset_unlabelled_list']):
-        print(f"Session {i+1} novel dataset size:", len(dataset))
+        print(f"Session {i + 1} novel dataset size:", len(dataset))
+
+        # 区分新类和已见新类
+        if i == 0:
+            # Session 1只有新类，没有已见新类
+            print(f"Session {i + 1} novel classes:")
+            print(f"  - 新类: [{class_names[novel_classes[0]]}]")
+        elif i == 1:
+            # Session 2有一个新类和一个已见新类
+            print(f"Session {i + 1} novel classes:")
+            print(f"  - 已见新类: [{class_names[novel_classes[0]]}]")
+            print(f"  - 新类: [{class_names[novel_classes[1]]}]")
+        else:
+            # Session 3有一个新类和两个已见新类
+            print(f"Session {i + 1} novel classes:")
+            print(f"  - 已见新类: [{class_names[novel_classes[0]]}, {class_names[novel_classes[1]]}]")
+            print(f"  - 新类: [{class_names[novel_classes[2]]}]")
 
     for i, dataset in enumerate(datasets['online_test_dataset_list']):
-        print(f"Session {i+1} test dataset size:", len(dataset))
-"""
+        print(f"Session {i + 1} test dataset size:", len(dataset))
+        test_classes = list(train_classes) + session_novel_class_map[i]
+        print(f"Session {i + 1} test classes:", [class_names[c] for c in test_classes])
