@@ -7,7 +7,7 @@ set -e
 set -x
 
 # 运行训练脚本
-CUDA_VISIBLE_DEVICES=0 python train_happy.py \
+CUDA_VISIBLE_DEVICES=0 python ./Happy-CGCD/train_happy.py \
     --dataset_name 'clear10' \
     --batch_size 128 \
     --transform 'imagenet' \
