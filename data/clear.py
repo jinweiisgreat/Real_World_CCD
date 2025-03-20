@@ -191,8 +191,18 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
     online_test_dataset_list = []
     cumulative_test_datasets = []
 
+    # if test_mode == 'cumulative_session':
+    #     cumulative_test_datasets = [offline_test_dataset]  # ✅ 先加入 offline test
+
     for session in range(continual_session_num):
         domain_id = session + 2  # 会话1对应文件夹2，依此类推
+
+        # ✅ 重新加载 Online Test 数据
+        test_dataset_full = CustomCLEAR10Dataset(
+            root=os.path.join(clear_10_root, 'test'),
+            transform=test_transform,
+            domain=domain_id  # 🔥 这里动态切换 `test/{session+2}/`
+        )
 
         # 当前会话需要使用的所有类别
         current_novel_classes = session_novel_class_map[session]
@@ -257,7 +267,7 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
         # 包含旧类和当前所有出现过的新类
         test_classes = list(train_classes) + current_novel_classes
         session_test_dataset = subsample_classes(
-            deepcopy(test_dataset_full),
+            test_dataset_full,
             include_classes=test_classes
         )
 
@@ -272,6 +282,7 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
             print("online_test_dataset_list:", len(online_test_dataset_list))
         elif test_mode == 'cumulative_session':
             # Session-0 -> Session-T
+            cumulative_test_datasets = [offline_test_dataset]
             cumulative_test_datasets.append(session_test_dataset)
             combined_test_dataset = subDataset_wholeDataset(cumulative_test_datasets)
             online_test_dataset_list.append(combined_test_dataset)
@@ -308,7 +319,7 @@ if __name__ == '__main__':
     config_dict = {
         'continual_session_num': 3,
         'online_novel_unseen_num': 600,
-        'online_old_seen_num': 40,
+        'online_old_seen_num': 50,
         'online_novel_seen_num': 50
     }
 
@@ -329,10 +340,8 @@ if __name__ == '__main__':
         test_mode=test_mode  # 传递测试模式
     )
 
-    print("\n======== 数据集统计信息 ========\n")
+    print("\n======== 测试数据统计 ========\n")
     print(f"测试模式: {test_mode}\n")
-    print(f"Offline Train Dataset: {len(datasets['offline_train_dataset'])} samples")
-    print(f"Offline Train Classes ({len(train_classes)}): {[class_names[i] for i in train_classes]}\n")
     print(f"Offline Test Dataset: {len(datasets['offline_test_dataset'])} samples")
     print(f"Offline Test Classes ({len(train_classes)}): {[class_names[i] for i in train_classes]}\n")
 
@@ -342,17 +351,7 @@ if __name__ == '__main__':
         2: list(novel_classes)
     }
 
-    for i, dataset in enumerate(datasets['online_old_dataset_unlabelled_list']):
-        print(f"Session {i + 1} - Old Dataset: {len(dataset)} samples")
-        print(f"  - Old Classes ({len(train_classes)}): {[class_names[c] for c in train_classes]}\n")
-
-    for i, dataset in enumerate(datasets['online_novel_dataset_unlabelled_list']):
-        new_classes = session_novel_class_map[i]
-        print(f"Session {i + 1} - Novel Dataset: {len(dataset)} samples")
-        print(f"  - New Classes ({len(new_classes)}): {[class_names[c] for c in new_classes]}\n")
-
-    print("\n======== 测试数据统计 ========\n")
-    cumulative_test_data = []
+    cumulative_test_data = []  # ✅ 先加入 offline test dataset
 
     for i, dataset in enumerate(datasets['online_test_dataset_list']):
         if test_mode == "cumulative_session":
@@ -365,3 +364,4 @@ if __name__ == '__main__':
         print(f"Session {i + 1} - Test Dataset (Test Mode: {test_mode})")
         print(f"  - Test Dataset Size: {len(combined_test_dataset)} samples")
         print(f"  - Test Classes ({len(test_classes)}): {[class_names[c] for c in test_classes]}\n")
+
