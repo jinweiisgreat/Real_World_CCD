@@ -217,12 +217,13 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
             include_classes=train_classes
         )
 
-        # 为每个旧类随机选择40个样本
+        # 为每个旧类随机选择「参数」个样本
         old_samples_list = []
         for cls in train_classes:
             cls_idxs = np.where(old_classes_dataset.targets == cls)[0]
-            if len(cls_idxs) > 40:
-                selected_idxs = np.random.choice(cls_idxs, 40, replace=False)
+            sample_count = config_dict['online_old_seen_num']
+            if len(cls_idxs) > sample_count:
+                selected_idxs = np.random.choice(cls_idxs, sample_count, replace=False)
                 old_samples_list.append(subsample_dataset(deepcopy(old_classes_dataset), selected_idxs))
             else:
                 old_samples_list.append(subsample_dataset(deepcopy(old_classes_dataset), cls_idxs))
