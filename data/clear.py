@@ -189,6 +189,7 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
     online_old_dataset_unlabelled_list = []
     online_novel_dataset_unlabelled_list = []
     online_test_dataset_list = []
+    cumulative_test_datasets = []
 
     for session in range(continual_session_num):
         domain_id = session + 2  # 会话1对应文件夹2，依此类推
@@ -301,8 +302,8 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
 
 
 # 测试代码，使用时请注释掉
-
 if __name__ == '__main__':
+    test_mode = "cumulative_session"  # 可选 "current_session"
     clear_10_root = '/home/ps/_jinwei/Dataset/CLEAR/CLEAR10_CGCD'
     config_dict = {
         'continual_session_num': 3,
@@ -311,18 +312,9 @@ if __name__ == '__main__':
         'online_novel_seen_num': 50
     }
 
-    # 类别索引到名称的映射
     class_names = {
-        0: 'baseball',
-        1: 'bus',
-        2: 'camera',
-        3: 'cosplay',
-        4: 'dress',
-        5: 'hockey',
-        6: 'laptop',
-        7: 'racing',
-        8: 'soccer',
-        9: 'sweater'
+        0: 'baseball', 1: 'bus', 2: 'camera', 3: 'cosplay', 4: 'dress',
+        5: 'hockey', 6: 'laptop', 7: 'racing', 8: 'soccer', 9: 'sweater'
     }
 
     train_classes = (0, 1, 2, 3, 4, 5, 6)
@@ -333,45 +325,43 @@ if __name__ == '__main__':
         test_transform=None,
         config_dict=config_dict,
         train_classes=train_classes,
-        novel_classes=novel_classes
+        novel_classes=novel_classes,
+        test_mode=test_mode  # 传递测试模式
     )
 
-    print("Offline train dataset size:", len(datasets['offline_train_dataset']))
-    print("Offline train classes:", [class_names[i] for i in train_classes])
-    print("Offline test dataset size:", len(datasets['offline_test_dataset']))
-    print("Offline test classes:", [class_names[i] for i in train_classes])
+    print("\n======== 数据集统计信息 ========\n")
+    print(f"测试模式: {test_mode}\n")
+    print(f"Offline Train Dataset: {len(datasets['offline_train_dataset'])} samples")
+    print(f"Offline Train Classes ({len(train_classes)}): {[class_names[i] for i in train_classes]}\n")
+    print(f"Offline Test Dataset: {len(datasets['offline_test_dataset'])} samples")
+    print(f"Offline Test Classes ({len(train_classes)}): {[class_names[i] for i in train_classes]}\n")
 
-    # 每个会话的新类映射
     session_novel_class_map = {
-        0: [novel_classes[0]],  # Session 1: racing
-        1: [novel_classes[0], novel_classes[1]],  # Session 2: racing, soccer
-        2: list(novel_classes)  # Session 3: racing, soccer, sweater
+        0: [novel_classes[0]],
+        1: [novel_classes[0], novel_classes[1]],
+        2: list(novel_classes)
     }
 
     for i, dataset in enumerate(datasets['online_old_dataset_unlabelled_list']):
-        print(f"Session {i + 1} old dataset size:", len(dataset))
-        print(f"Session {i + 1} old classes:", [class_names[c] for c in train_classes])
+        print(f"Session {i + 1} - Old Dataset: {len(dataset)} samples")
+        print(f"  - Old Classes ({len(train_classes)}): {[class_names[c] for c in train_classes]}\n")
 
     for i, dataset in enumerate(datasets['online_novel_dataset_unlabelled_list']):
-        print(f"Session {i + 1} novel dataset size:", len(dataset))
+        new_classes = session_novel_class_map[i]
+        print(f"Session {i + 1} - Novel Dataset: {len(dataset)} samples")
+        print(f"  - New Classes ({len(new_classes)}): {[class_names[c] for c in new_classes]}\n")
 
-        # 区分新类和已见新类
-        if i == 0:
-            # Session 1只有新类，没有已见新类
-            print(f"Session {i + 1} novel classes:")
-            print(f"  - 新类: [{class_names[novel_classes[0]]}]")
-        elif i == 1:
-            # Session 2有一个新类和一个已见新类
-            print(f"Session {i + 1} novel classes:")
-            print(f"  - 已见新类: [{class_names[novel_classes[0]]}]")
-            print(f"  - 新类: [{class_names[novel_classes[1]]}]")
-        else:
-            # Session 3有一个新类和两个已见新类
-            print(f"Session {i + 1} novel classes:")
-            print(f"  - 已见新类: [{class_names[novel_classes[0]]}, {class_names[novel_classes[1]]}]")
-            print(f"  - 新类: [{class_names[novel_classes[2]]}]")
+    print("\n======== 测试数据统计 ========\n")
+    cumulative_test_data = []
 
     for i, dataset in enumerate(datasets['online_test_dataset_list']):
-        print(f"Session {i + 1} test dataset size:", len(dataset))
+        if test_mode == "cumulative_session":
+            cumulative_test_data.append(dataset)
+            combined_test_dataset = subDataset_wholeDataset(cumulative_test_data)
+        else:
+            combined_test_dataset = dataset
+
         test_classes = list(train_classes) + session_novel_class_map[i]
-        print(f"Session {i + 1} test classes:", [class_names[c] for c in test_classes])
+        print(f"Session {i + 1} - Test Dataset (Test Mode: {test_mode})")
+        print(f"  - Test Dataset Size: {len(combined_test_dataset)} samples")
+        print(f"  - Test Classes ({len(test_classes)}): {[class_names[c] for c in test_classes]}\n")
