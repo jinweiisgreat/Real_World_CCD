@@ -189,10 +189,7 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
     online_old_dataset_unlabelled_list = []
     online_novel_dataset_unlabelled_list = []
     online_test_dataset_list = []
-    cumulative_test_datasets = []
-
-    # if test_mode == 'cumulative_session':
-    #     cumulative_test_datasets = [offline_test_dataset]  # ✅ 先加入 offline test
+    cumulative_test_datasets = [offline_test_dataset]
 
     for session in range(continual_session_num):
         domain_id = session + 2  # 会话1对应文件夹2，依此类推
@@ -276,19 +273,16 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
         # Function: 添加两种增量评估模式：1.current session和cumulative session；
         # 通过参数 test_mode 控制
         # ===========================================
-        if test_mode == 'current_session':
-            # 仅包含当前会话(域)的test类别
-            online_test_dataset_list.append(session_test_dataset)
-            print("online_test_dataset_list:", len(online_test_dataset_list))
-        elif test_mode == 'cumulative_session':
+        if test_mode == 'cumulative_session':
             # Session-0 -> Session-T
-            cumulative_test_datasets = [offline_test_dataset]
-            cumulative_test_datasets.append(session_test_dataset)
-            combined_test_dataset = subDataset_wholeDataset(cumulative_test_datasets)
+            cumulative_test_datasets.append(session_test_dataset)  # ✅ 逐步累加
+            combined_test_dataset = subDataset_wholeDataset(cumulative_test_datasets)  # ✅ 合并
             online_test_dataset_list.append(combined_test_dataset)
             print("online_test_dataset_list:", len(online_test_dataset_list))
         else:
-            raise ValueError("Invalid test_mode! Choose 'current' or 'cumulative'.")
+            # 仅包含当前会话(域)的test类别
+            online_test_dataset_list.append(session_test_dataset)
+            print("online_test_dataset_list:", len(online_test_dataset_list))
 
     # ===========================================
     # 3. 组织返回结果
@@ -314,7 +308,7 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
 
 # 测试代码，使用时请注释掉
 if __name__ == '__main__':
-    test_mode = "cumulative_session"  # 可选 "current_session"
+    test_mode = "cumulative_session"  # 可选 "current_session，cumulative_session"
     clear_10_root = '/home/ps/_jinwei/Dataset/CLEAR/CLEAR10_CGCD'
     config_dict = {
         'continual_session_num': 3,
@@ -340,28 +334,90 @@ if __name__ == '__main__':
         test_mode=test_mode  # 传递测试模式
     )
 
-    print("\n======== 测试数据统计 ========\n")
-    print(f"测试模式: {test_mode}\n")
-    print(f"Offline Test Dataset: {len(datasets['offline_test_dataset'])} samples")
-    print(f"Offline Test Classes ({len(train_classes)}): {[class_names[i] for i in train_classes]}\n")
 
+    # 辅助函数：计算每个类别的样本数
+    def count_samples_per_class(dataset):
+        class_counts = {}
+        targets = dataset.targets
+        for target in targets:
+            class_counts[target] = class_counts.get(target, 0) + 1
+        return class_counts
+
+
+    # 打印每个类别的样本数和类名
+    def print_class_details(class_counts, prefix=""):
+        for cls, count in sorted(class_counts.items()):
+            print(f"{prefix}类别 {cls} ({class_names[cls]}): {count} 个样本")
+
+
+    print("\n======== 数据集详细统计 ========\n")
+
+    # ===== 离线阶段数据集统计 =====
+    print("===== 离线阶段 =====")
+
+    # 离线训练集
+    offline_train_counts = count_samples_per_class(datasets['offline_train_dataset'])
+    print("\n离线训练集:")
+    print(f"总样本数: {len(datasets['offline_train_dataset'])}")
+    print_class_details(offline_train_counts, "  ")
+
+    # 离线测试集
+    offline_test_counts = count_samples_per_class(datasets['offline_test_dataset'])
+    print("\n离线测试集:")
+    print(f"总样本数: {len(datasets['offline_test_dataset'])}")
+    print_class_details(offline_test_counts, "  ")
+
+    # ===== 在线阶段数据集统计 =====
     session_novel_class_map = {
         0: [novel_classes[0]],
         1: [novel_classes[0], novel_classes[1]],
         2: list(novel_classes)
     }
 
-    cumulative_test_data = []  # ✅ 先加入 offline test dataset
+    for i in range(len(datasets['online_old_dataset_unlabelled_list'])):
+        print(f"\n===== 在线阶段 - 会话 {i + 1} =====")
 
-    for i, dataset in enumerate(datasets['online_test_dataset_list']):
-        if test_mode == "cumulative_session":
-            cumulative_test_data.append(dataset)
-            combined_test_dataset = subDataset_wholeDataset(cumulative_test_data)
-        else:
-            combined_test_dataset = dataset
+        # 旧类无标签样本
+        old_dataset = datasets['online_old_dataset_unlabelled_list'][i]
+        old_counts = count_samples_per_class(old_dataset)
+        print("\n旧类无标签样本:")
+        print(f"总样本数: {len(old_dataset)}")
+        print_class_details(old_counts, "  ")
 
-        test_classes = list(train_classes) + session_novel_class_map[i]
-        print(f"Session {i + 1} - Test Dataset (Test Mode: {test_mode})")
-        print(f"  - Test Dataset Size: {len(combined_test_dataset)} samples")
-        print(f"  - Test Classes ({len(test_classes)}): {[class_names[c] for c in test_classes]}\n")
+        # 新类无标签样本
+        novel_dataset = datasets['online_novel_dataset_unlabelled_list'][i]
+        novel_counts = count_samples_per_class(novel_dataset)
+
+        # 区分已见新类和当前新类
+        current_novel_classes = session_novel_class_map[i]
+        previously_seen = []
+        newly_introduced = []
+
+        for cls in current_novel_classes:
+            if i > 0 and cls in session_novel_class_map[i - 1]:
+                previously_seen.append(cls)
+            else:
+                newly_introduced.append(cls)
+
+        print("\n新类无标签样本:")
+        print(f"总样本数: {len(novel_dataset)}")
+
+        if previously_seen:
+            print("\n  已见新类:")
+            for cls in previously_seen:
+                if cls in novel_counts:
+                    print(f"  类别 {cls} ({class_names[cls]}): {novel_counts[cls]} 个样本")
+
+        if newly_introduced:
+            print("\n  当前新类:")
+            for cls in newly_introduced:
+                if cls in novel_counts:
+                    print(f"  类别 {cls} ({class_names[cls]}): {novel_counts[cls]} 个样本")
+
+        # 测试集
+        test_dataset = datasets['online_test_dataset_list'][i]
+        test_counts = count_samples_per_class(test_dataset)
+        print(f"\n测试集 (模式: {test_mode}):")
+        print(f"总样本数: {len(test_dataset)}")
+        print_class_details(test_counts, "  ")
 
