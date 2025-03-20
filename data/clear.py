@@ -119,7 +119,8 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
                           train_classes=(0, 1, 2, 3, 4, 5, 6),
                           novel_classes=(7, 8, 9),
                           prop_train_labels=1.0,
-                          split_train_val=False, is_shuffle=False, seed=0):
+                          split_train_val=False, is_shuffle=False, seed=0,
+                          test_mode='current_session'):
     """
     为CLEAR10数据集创建适用于Continual-GCD的数据加载器
 
@@ -258,7 +259,24 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
             deepcopy(test_dataset_full),
             include_classes=test_classes
         )
-        online_test_dataset_list.append(session_test_dataset)
+
+        # ===========================================
+        # Update: 2025.3.20
+        # Function: 添加两种增量评估模式：1.current session和cumulative session；
+        # 通过参数 test_mode 控制
+        # ===========================================
+        if test_mode == 'current_session':
+            # 仅包含当前会话(域)的test类别
+            online_test_dataset_list.append(session_test_dataset)
+            print("online_test_dataset_list:", len(online_test_dataset_list))
+        elif test_mode == 'cumulative_session':
+            # Session-0 -> Session-T
+            cumulative_test_datasets.append(session_test_dataset)
+            combined_test_dataset = subDataset_wholeDataset(cumulative_test_datasets)
+            online_test_dataset_list.append(combined_test_dataset)
+            print("online_test_dataset_list:", len(online_test_dataset_list))
+        else:
+            raise ValueError("Invalid test_mode! Choose 'current' or 'cumulative'.")
 
     # ===========================================
     # 3. 组织返回结果

@@ -622,6 +622,48 @@ if __name__ == "__main__":
                 args.num_cur_novel_classes = args.num_novel_class_per_session * (session+1)
             args.logger.info('number of all novel class (seen novel + unseen novel) in current session: {}'.format(args.num_cur_novel_classes))
 
+            # ---------- 在这里添加新代码 ----------
+            # 打印类别详细信息
+            args.logger.info("\n详细类别信息:")
+
+            # 1. 打印已知类(Known classes)信息
+            known_classes = list(range(args.num_labeled_classes))  # 已知类的索引
+            known_class_names = [str(cls) for cls in known_classes]  # 如果没有类名就用索引
+            args.logger.info(f"已知类({len(known_classes)}个): {known_class_names}")
+
+            # 2. 打印已见类(Seen classes)信息 - 仅当不是第一个session时
+            if session > 0:
+                seen_novel_classes = list(range(args.num_labeled_classes, args.num_seen_classes))
+                seen_novel_class_names = [str(cls) for cls in seen_novel_classes]
+                args.logger.info(f"已见新类({len(seen_novel_classes)}个): {seen_novel_class_names}")
+
+            # 3. 打印当前session的新类信息
+            current_novel_classes = []
+
+            # 根据不同数据集获取新类
+            if args.dataset_name == 'cifar100':
+                current_novel_classes = np.unique(online_session_train_dataset.novel_unlabelled_dataset.targets)
+            elif args.dataset_name == 'tiny_imagenet':
+                novel_cls_labels = [t for i, (p, t) in
+                                    enumerate(online_session_train_dataset.novel_unlabelled_dataset.data)]
+                current_novel_classes = np.unique(novel_cls_labels)
+            elif args.dataset_name == 'aircraft':
+                novel_cls_labels = [t for i, (p, t) in
+                                    enumerate(online_session_train_dataset.novel_unlabelled_dataset.samples)]
+                current_novel_classes = np.unique(novel_cls_labels)
+            elif args.dataset_name == 'scars':
+                current_novel_classes = np.unique(online_session_train_dataset.novel_unlabelled_dataset.target)
+            else:
+                # 如果没有特定处理，使用索引范围
+                start_idx = args.num_seen_classes
+                end_idx = args.num_labeled_classes + args.num_cur_novel_classes
+                current_novel_classes = list(range(start_idx, end_idx))
+
+            # 转换为名称并打印
+            current_novel_class_names = [str(cls) for cls in current_novel_classes]
+            args.logger.info(f"当前新类({len(current_novel_classes)}个): {current_novel_class_names}")
+            # ---------- 新增代码结束 ----------
+
 
             '''tunable params in backbone'''
             ####################################################################################################################
