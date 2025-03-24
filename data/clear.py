@@ -192,7 +192,7 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
     cumulative_test_datasets = [offline_test_dataset]
 
     for session in range(continual_session_num):
-        domain_id = session + 2  # 会话1对应文件夹2，依此类推
+        domain_id = session + 2  # 会话1对应文件夹2，依此类推(对于增量任务来说这里的session是从0开始的，也就是session1)
 
         # ✅ 重新加载 Online Test 数据
         test_dataset_full = CustomCLEAR10Dataset(

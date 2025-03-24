@@ -599,10 +599,6 @@ if __name__ == "__main__":
             # dataset for the current session
             online_session_train_dataset = online_session_train_dataset_list[session]
             online_session_test_dataset = online_session_test_dataset_list[session]
-
-            print("Test targets:", online_session_test_dataset.targets)
-            print("Model output:", model[1].last_layer.weight.shape[0])
-
             online_session_train_loader = DataLoader(online_session_train_dataset, num_workers=args.num_workers,
                                                      batch_size=args.batch_size, shuffle=True, drop_last=True, pin_memory=True)
             online_session_test_loader = DataLoader(online_session_test_dataset, num_workers=args.num_workers_test,
@@ -612,6 +608,8 @@ if __name__ == "__main__":
             args.num_seen_classes = args.num_labeled_classes + args.num_novel_class_per_session * session
             args.logger.info('number of seen class (old + seen novel) at the beginning of current session: {}'.format(args.num_seen_classes))
             if args.dataset_name == 'cifar100':
+                args.num_cur_novel_classes = len(np.unique(online_session_train_dataset.novel_unlabelled_dataset.targets))
+            if args.dataset_name == 'clear10':
                 args.num_cur_novel_classes = len(np.unique(online_session_train_dataset.novel_unlabelled_dataset.targets))
             elif args.dataset_name == 'tiny_imagenet':
                 novel_cls_labels = [t for i, (p, t) in enumerate(online_session_train_dataset.novel_unlabelled_dataset.data)]
@@ -645,6 +643,9 @@ if __name__ == "__main__":
 
             # 根据不同数据集获取新类
             if args.dataset_name == 'cifar100':
+                current_novel_classes = np.unique(online_session_train_dataset.novel_unlabelled_dataset.targets)
+
+            elif args.dataset_name == 'clear10':
                 current_novel_classes = np.unique(online_session_train_dataset.novel_unlabelled_dataset.targets)
             elif args.dataset_name == 'tiny_imagenet':
                 novel_cls_labels = [t for i, (p, t) in
@@ -735,6 +736,11 @@ if __name__ == "__main__":
             ##############################################
 
             model_cur = nn.Sequential(backbone_cur, projector_cur)   # NOTE!!! backbone_cur
+
+
+            print("Test targets:", online_session_test_dataset.targets)
+            print("Model output:", model_cur[1].last_layer.weight.shape[0])
+
             args.logger.info('incremental classifier heads from {} to {}'.format(len(model_pre[1].last_layer.weight_v), len(model_cur[1].last_layer.weight_v)))
             model_cur.to(device)
             ####################################################################################################################
