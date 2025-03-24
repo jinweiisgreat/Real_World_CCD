@@ -20,14 +20,12 @@ from data.fgvc_aircraft import get_aircraft_datasets
 from data.stanford_cars import get_scars_datasets
 # 导入CLEAR数据集实现
 from data.clear import get_clear_datasets
-
 from data.cifar import subsample_classes as subsample_dataset_cifar
 from data.tiny_imagenet import subsample_classes as subsample_dataset_tiny_imagenet
 from data.imagenet import subsample_classes as subsample_dataset_imagenet
 from data.cub import subsample_classes as subsample_dataset_cub
 from data.fgvc_aircraft import subsample_classes as subsample_dataset_aircraft
 from data.stanford_cars import subsample_classes as subsample_dataset_scars
-
 from data.clear import subsample_classes as subsample_dataset_clear
 
 from config import osr_split_dir

@@ -7,7 +7,7 @@ set -e
 set -x
 
 # 运行训练脚本
-CUDA_VISIBLE_DEVICES=0 python ./Happy-CGCD/train_happy.py \
+CUDA_VISIBLE_DEVICES=0 python train_happy.py \
     --dataset_name 'clear10' \
     --batch_size 128 \
     --transform 'imagenet' \
@@ -20,5 +20,5 @@ CUDA_VISIBLE_DEVICES=0 python ./Happy-CGCD/train_happy.py \
     --epochs_offline 100 \
     --continual_session_num 3 \
     --online_novel_unseen_num 600 \
-    --online_old_seen_num 40 \
-    --online_novel_seen_num 50
+    --online_old_seen_num 80 \
+    --online_novel_seen_num 80

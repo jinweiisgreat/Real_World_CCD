@@ -32,6 +32,6 @@ CUDA_VISIBLE_DEVICES=0 python train_happy.py \
     --online_old_seen_num 40 \
     --online_novel_seen_num 50 \
     --init_new_head \
-    --load_offline_id Old7_Ratio0.8_20250308-164233 \
+    --load_offline_id Old7_Ratio1.0_20250323-183709 \
     --shuffle_classes \
     --seed 0
