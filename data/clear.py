@@ -120,7 +120,7 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
                           novel_classes=(7, 8, 9),
                           prop_train_labels=1.0,
                           split_train_val=False, is_shuffle=False, seed=0,
-                          test_mode='cumulative_session'): # current_session, cumulative_session
+                          test_mode='current_session'): # current_session, cumulative_session
     """
     为CLEAR10数据集创建适用于Continual-GCD的数据加载器
 
@@ -310,7 +310,7 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
 # 测试代码，使用时请注释掉
 
 if __name__ == '__main__':
-    test_mode = "cumulative_session"  # 可选 "current_session，cumulative_session"
+    test_mode = "current_session"  # 可选 "current_session，cumulative_session"
     clear_10_root = '/home/ps/_jinwei/Dataset/CLEAR/CLEAR10_CGCD'
     config_dict = {
         'continual_session_num': 3,

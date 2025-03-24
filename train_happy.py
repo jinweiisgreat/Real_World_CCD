@@ -450,7 +450,7 @@ if __name__ == "__main__":
     args = get_class_splits(args)
 
     args.num_labeled_classes = len(args.train_classes)
-    args.num_unlabeled_classes = len(args.unlabeled_classes)
+    args.num_unlabeled_classes = len(args.unlabeled_classes) # get_dataset
 
     args.exp_root = args.exp_root + '_' + args.train_session
     args.exp_name = 'happy' + '-' + args.train_session
@@ -599,6 +599,9 @@ if __name__ == "__main__":
             # dataset for the current session
             online_session_train_dataset = online_session_train_dataset_list[session]
             online_session_test_dataset = online_session_test_dataset_list[session]
+
+            print("Test targets:", online_session_test_dataset.targets)
+            print("Model output:", model[1].last_layer.weight.shape[0])
 
             online_session_train_loader = DataLoader(online_session_train_dataset, num_workers=args.num_workers,
                                                      batch_size=args.batch_size, shuffle=True, drop_last=True, pin_memory=True)
