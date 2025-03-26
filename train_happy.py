@@ -22,6 +22,7 @@ from models.utils_simgcd_pro import get_kmeans_centroid_for_new_head
 from models.utils_proto_aug import ProtoAugManager
 from models import vision_transformer as vits
 from config import dino_pretrain_path, exp_root
+from collections import Counter
 
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -336,6 +337,23 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
 
 def test_online(model, test_loader, epoch, save_name, args):
 
+# ============================ 打印测试集信息 ============================
+
+    def print_testset_info(test_loader, class_names=None, prefix=""):
+        all_labels = []
+        for _, labels, _ in test_loader:
+            all_labels.extend(labels.cpu().numpy())
+
+        counter = Counter(all_labels)
+        print(f"\n{prefix}测试集中类别分布:")
+        for cls_id in sorted(counter.keys()):
+            cls_name = class_names[cls_id] if class_names and cls_id in class_names else str(cls_id)
+            print(f"  类别 {cls_id} ({cls_name}): {counter[cls_id]} 个样本")
+        print(f"  总测试样本: {len(all_labels)}")
+
+    print_testset_info(test_loader, class_names=getattr(args, 'class_names', None), prefix="Online")
+# ============================ 打印测试集信息 完毕============================
+
     model.eval()
 
     preds, targets = [], []
@@ -431,6 +449,8 @@ if __name__ == "__main__":
     parser.add_argument('--online_novel_unseen_num', default=400, type=int)
     parser.add_argument('--online_old_seen_num', default=50, type=int)
     parser.add_argument('--online_novel_seen_num', default=50, type=int)
+    parser.add_argument('--test_mode', type=str, default='cumulative_session',
+                        help='options: current_session, cumulative_session')
 
     # shuffle dataset classes
     parser.add_argument('--shuffle_classes', action='store_true', default=False)
@@ -609,8 +629,6 @@ if __name__ == "__main__":
             args.logger.info('number of seen class (old + seen novel) at the beginning of current session: {}'.format(args.num_seen_classes))
             if args.dataset_name == 'cifar100':
                 args.num_cur_novel_classes = len(np.unique(online_session_train_dataset.novel_unlabelled_dataset.targets))
-            if args.dataset_name == 'clear10':
-                args.num_cur_novel_classes = len(np.unique(online_session_train_dataset.novel_unlabelled_dataset.targets))
             elif args.dataset_name == 'tiny_imagenet':
                 novel_cls_labels = [t for i, (p, t) in enumerate(online_session_train_dataset.novel_unlabelled_dataset.data)]
                 args.num_cur_novel_classes = len(np.unique(novel_cls_labels))
@@ -643,9 +661,6 @@ if __name__ == "__main__":
 
             # 根据不同数据集获取新类
             if args.dataset_name == 'cifar100':
-                current_novel_classes = np.unique(online_session_train_dataset.novel_unlabelled_dataset.targets)
-
-            elif args.dataset_name == 'clear10':
                 current_novel_classes = np.unique(online_session_train_dataset.novel_unlabelled_dataset.targets)
             elif args.dataset_name == 'tiny_imagenet':
                 novel_cls_labels = [t for i, (p, t) in
@@ -736,10 +751,6 @@ if __name__ == "__main__":
             ##############################################
 
             model_cur = nn.Sequential(backbone_cur, projector_cur)   # NOTE!!! backbone_cur
-
-
-            print("Test targets:", online_session_test_dataset.targets)
-            print("Model output:", model_cur[1].last_layer.weight.shape[0])
 
             args.logger.info('incremental classifier heads from {} to {}'.format(len(model_pre[1].last_layer.weight_v), len(model_cur[1].last_layer.weight_v)))
             model_cur.to(device)

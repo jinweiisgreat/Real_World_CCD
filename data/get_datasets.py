@@ -80,7 +80,8 @@ def get_datasets(dataset_name, train_transform, test_transform, args):
                                                     prop_train_labels=args.prop_train_labels,
                                                     split_train_val=False,
                                                     is_shuffle=args.shuffle_classes,
-                                                    seed=args.seed)   # NOTE!!! seed for shuffle
+                                                    seed=args.seed, # NOTE!!! seed for shuffle
+                                                    test_mode=args.test_mode)
 
     # Set target transforms:
     target_transform_dict = {}
@@ -94,9 +95,10 @@ def get_datasets(dataset_name, train_transform, test_transform, args):
 
     for dataset_name, dataset in datasets.items():
         if dataset is not None:
-            if type(dataset) is list:
+            if isinstance(dataset, list):
                 for d in dataset:
-                    d.target_transform = target_transform
+                    if d is not None:  # ✅ 加上判断
+                        d.target_transform = target_transform
             else:
                 dataset.target_transform = target_transform
 

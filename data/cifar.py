@@ -120,7 +120,7 @@ def get_train_val_indices(train_dataset, val_split=0.2):
 
 # cifar10 dataset for Continual-GCD
 def get_cifar_10_datasets(train_transform, test_transform, config_dict, train_classes=(0, 1, 8, 9),
-                           prop_train_labels=0.8, split_train_val=False, is_shuffle=False, seed=0):
+                           prop_train_labels=0.8, split_train_val=False, is_shuffle=False, seed=0, test_mode = None):
     continual_session_num = config_dict['continual_session_num']
     online_novel_unseen_num = config_dict['online_novel_unseen_num']
     online_old_seen_num = config_dict['online_old_seen_num']
@@ -208,6 +208,8 @@ def get_cifar_10_datasets(train_transform, test_transform, config_dict, train_cl
         online_session_novel_dataset = subDataset_wholeDataset(online_session_novel_samples) # [4000,4250,4500] 4000;4000+1*250;4000+2*250
         online_novel_dataset_unlabelled_list.append(online_session_novel_dataset)
 
+        print("online_novel_dataset_unlabelled_list", online_novel_dataset_unlabelled_list)
+
         # online session test dataset
         online_session_test_dataset = subsample_classes(
             deepcopy(test_dataset), include_classes=list(train_classes) + online_session_targets.tolist())
@@ -279,7 +281,6 @@ def get_cifar_100_datasets(train_transform, test_transform, config_dict, train_c
                                       for i, samples in enumerate(each_old_unlabeled_samples)]   # 80*50 (80 old classes， 50 samples per class)
 
         online_session_old_dataset = subDataset_wholeDataset(online_session_old_samples)
-        print(online_session_old_dataset.data.shape)
         online_old_dataset_unlabelled_list.append(online_session_old_dataset)
 
 
@@ -336,10 +337,22 @@ def get_cifar_100_datasets(train_transform, test_transform, config_dict, train_c
     return all_datasets, novel_targets_shuffle
 
 
-# if __name__ == '__main__':
-#     datasets = get_cifar_100_datasets(train_transform=None, test_transform=None,
-#                                 config_dict=dataset_split_config_dict['cifar100'],
-#                                 train_classes=range(80),
-#                                 prop_train_labels=0.8,
-#                                 split_train_val=False)
+if __name__ == '__main__':
+    import torchvision.transforms as transforms
+
+    # 基础的 transform，只做 ToTensor
+    train_transform = transforms.ToTensor()
+    test_transform = transforms.ToTensor()
+
+    # 打印 CIFAR-10 数据集信息
+    print("========== CIFAR-10 ==========")
+    cifar10_dataset = CustomCIFAR10(root=cifar_10_root, train=True, download=True, transform=train_transform)
+    print(f"Train Data Shape: {cifar10_dataset.data.shape}")
+    print(f"Number of Training Samples: {len(cifar10_dataset)}")
+    print(f"Number of Classes: {len(set(cifar10_dataset.targets))}")
+    print(f"Class Distribution:")
+    from collections import Counter
+    print(Counter(cifar10_dataset.targets))
+
+    print(cifar10_dataset)
 
