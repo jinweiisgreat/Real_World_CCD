@@ -386,6 +386,19 @@ def test_online(model, test_loader, epoch, save_name, args):
     all_acc_soft, seen_acc, unseen_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_soft,
                                                     T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
                                                     args=args)
+    # 打印参与 Unseen 计算的类
+    # unseen_labels = np.array(targets)[~mask_soft.astype(bool)]
+    # unseen_class_ids, counts = np.unique(unseen_labels, return_counts=True)
+    # unseen_class_ids = unseen_class_ids.tolist()
+    # counts = counts.tolist()
+    #
+    # unseen_class_names = [str(cls_id) for cls_id in unseen_class_ids]
+    #
+    # args.logger.info("\n参与 Unseen 计算的类 (Soft Mask = False):")
+    # for cls_id, cls_name, count in zip(unseen_class_ids, unseen_class_names, counts):
+    #     args.logger.info(f"  类别 ID: {cls_id} 名称: {cls_name} -> 样本数: {count}")
+    # args.logger.info(f"总 Unseen 类数: {len(unseen_class_ids)}")
+    # args.logger.info(f"总 Unseen 样本数: {len(unseen_labels)}")
 
     return all_acc, old_acc, new_acc, all_acc_soft, seen_acc, unseen_acc
 '''====================================================================================================================='''

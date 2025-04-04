@@ -29,10 +29,10 @@ CUDA_VISIBLE_DEVICES=0 python train_happy.py \
     --epochs_online_per_session 30 \
     --continual_session_num 3 \
     --online_novel_unseen_num 600 \
-    --online_old_seen_num 40 \
+    --online_old_seen_num 50 \
     --online_novel_seen_num 50 \
     --init_new_head \
-    --load_offline_id Old7_Ratio1.0_20250323-183709 \
+    --load_offline_id Old7_Ratio1.0_dataframe \
     --test_mode cumulative_session\
     --shuffle_classes \
     --seed 0

@@ -8,7 +8,6 @@ from config import clear_10_root
 from torchvision.datasets.folder import default_loader
 
 
-
 class CustomCLEAR10Dataset(Dataset):
     """
     自定义CLEAR10数据集类，用于支持唯一索引和域信息
@@ -286,6 +285,7 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
             # Session-0 -> Session-T
             cumulative_test_datasets.append(session_test_dataset)  # ✅ 逐步累加
             combined_test_dataset = subDataset_wholeDataset(cumulative_test_datasets)  # ✅ 合并
+            combined.target_transform = target_transform
             online_test_dataset_list.append(combined_test_dataset)
             print("online_test_dataset_list:", len(online_test_dataset_list))
         else:
@@ -318,6 +318,7 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
 
 
 # 测试代码，使用时请注释掉
+"""
 if __name__ == '__main__':
     import torchvision.transforms as transforms
     from collections import Counter
@@ -329,7 +330,7 @@ if __name__ == '__main__':
     # 创建配置字典
     config_dict = {
         'continual_session_num': 3,
-        'online_novel_unseen_num': 200,
+        'online_novel_unseen_num': 300,
         'online_old_seen_num': 50,
         'online_novel_seen_num': 50,
     }
@@ -345,7 +346,7 @@ if __name__ == '__main__':
         split_train_val=False,
         is_shuffle=False,
         seed=0,
-        test_mode='cumulative_session' # current_session, cumulative_session
+        test_mode='current_session' # current_session, cumulative_session
     )
 
     print("\n========== CLEAR10 Dataset Info ==========")
@@ -371,3 +372,37 @@ if __name__ == '__main__':
         print(f"Online Novel Unlabelled Samples: {len(novel_set)}")
         print(f"Online Test Samples: {len(test_set)}")
         print(f"Online Test Class Distribution: {Counter(test_set.targets)}")
+"""
+if __name__ == '__main__':
+    from torchvision import transforms
+
+    dummy_transform = transforms.Compose([transforms.ToTensor()])
+
+    config_dict = {
+        'continual_session_num': 3,
+        'online_novel_unseen_num': 300,
+        'online_old_seen_num': 50,
+        'online_novel_seen_num': 50,
+    }
+
+    all_datasets, novel_targets_shuffle = get_clear_datasets(
+        train_transform=dummy_transform,
+        test_transform=dummy_transform,
+        config_dict=config_dict,
+        is_shuffle=False
+    )
+
+    novel_datasets = all_datasets['online_novel_dataset_unlabelled_list']
+
+    for session_id, dataset in enumerate(novel_datasets):
+        print(f"\n[Session {session_id}] Online Novel Unlabelled Info")
+        class_counts = {}
+        for path, target in zip(dataset.data, dataset.targets):
+            class_name = os.path.basename(os.path.dirname(path))
+            if class_name not in class_counts:
+                class_counts[class_name] = 0
+            class_counts[class_name] += 1
+
+        for class_name, count in class_counts.items():
+            print(f"Class: {class_name}, Count: {count}")
+

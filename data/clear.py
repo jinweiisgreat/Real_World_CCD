@@ -7,21 +7,25 @@ from torch.utils.data import Dataset
 from torchvision.datasets.folder import default_loader
 from config import clear_10_root
 
-class CustomCLEAR(Dataset):
-    """
-    CUB-style dataset loader for CLEAR with domain support
-    Loads samples from split/domain/*class/*.jpg
-    """
 
-    def __init__(self, root, split='train', domains=(1,), transform=None, loader=default_loader):
+def build_class_mapping(root, split='train', domain=1):
+    base_path = os.path.join(root, split, str(domain))
+    class_names = sorted([d for d in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, d))])
+    return {name: idx for idx, name in enumerate(class_names)}
+
+
+class CustomCLEAR(Dataset):
+    def __init__(self, root, split='train', domains=(1,), transform=None, loader=default_loader, class_to_id=None):
         self.root = root
         self.split = split
         self.domains = domains if isinstance(domains, (list, tuple)) else [domains]
         self.transform = transform
         self.loader = loader
+        self.class_to_id = class_to_id or build_class_mapping(root, split, self.domains[0])
 
         self._load_metadata()
         self.uq_idxs = np.array(range(len(self)))
+        self.target_transform = None
 
     def _load_metadata(self):
         records = []
@@ -29,15 +33,17 @@ class CustomCLEAR(Dataset):
             domain_path = os.path.join(self.root, self.split, str(domain))
             if not os.path.exists(domain_path):
                 continue
-            for class_id, class_name in enumerate(sorted(os.listdir(domain_path))):
+            for class_name in sorted(os.listdir(domain_path)):
+                if class_name not in self.class_to_id:
+                    continue
+                class_id = self.class_to_id[class_name]
                 class_path = os.path.join(domain_path, class_name)
                 if not os.path.isdir(class_path):
                     continue
                 for fname in os.listdir(class_path):
-                    if fname.lower().endswith((".jpg", ".jpeg", ".png")):
-                        full_path = os.path.join(class_path, fname)
+                    if fname.lower().endswith(('.jpg', '.jpeg', '.png')):
                         records.append({
-                            "filepath": full_path,
+                            "filepath": os.path.join(class_path, fname),
                             "target": class_id,
                             "domain": domain
                         })
@@ -54,6 +60,9 @@ class CustomCLEAR(Dataset):
 
         if self.transform:
             img = self.transform(img)
+
+        if self.target_transform:
+            target = self.target_transform(target)
 
         return img, target, self.uq_idxs[idx]
 
@@ -96,19 +105,20 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
     if seed is not None:
         np.random.seed(seed)
 
-    # offline dataset
-    train_dataset = CustomCLEAR(root=root, split='train', domains=[1], transform=train_transform)
+    class_to_id = build_class_mapping(root, split='train', domain=1)
+
+    train_dataset = CustomCLEAR(root=root, split='train', domains=[1], transform=train_transform, class_to_id=class_to_id)
     offline_train_dataset = subsample_classes(deepcopy(train_dataset), include_classes=train_classes)
 
-    test_dataset = CustomCLEAR(root=root, split='test', domains=[1], transform=test_transform)
+    test_dataset = CustomCLEAR(root=root, split='test', domains=[1], transform=test_transform, class_to_id=class_to_id)
     offline_test_dataset = subsample_classes(deepcopy(test_dataset), include_classes=train_classes)
 
-    # session novel class mapping
     session_novel_class_map = {
         0: [novel_classes[0]],
         1: [novel_classes[0], novel_classes[1]],
         2: list(novel_classes)
     }
+
 
     online_old_dataset_unlabelled_list = []
     online_novel_dataset_unlabelled_list = []
@@ -117,24 +127,25 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
 
     for session in range(continual_session_num):
         domain_id = session + 2
-        train_domain_dataset = CustomCLEAR(root=root, split='train', domains=[domain_id], transform=train_transform)
-        test_domain_dataset = CustomCLEAR(root=root, split='test', domains=[domain_id], transform=test_transform)
+        train_domain_dataset = CustomCLEAR(root=root, split='train', domains=[domain_id], transform=train_transform, class_to_id=class_to_id)
+        test_domain_dataset = CustomCLEAR(root=root, split='test', domains=[domain_id], transform=test_transform, class_to_id=class_to_id)
 
         old_samples = []
         for cls in train_classes:
-            cls_idxs = train_domain_dataset.data.index[train_domain_dataset.data['target'] == cls].tolist()
+            cls_subset = subsample_classes(deepcopy(train_domain_dataset), include_classes=[cls])
+            cls_idxs = list(range(len(cls_subset.data)))
             sample_count = config_dict['online_old_seen_num']
             selected = np.random.choice(cls_idxs, min(sample_count, len(cls_idxs)), replace=False)
-            old_samples.append(subsample_dataset(deepcopy(train_domain_dataset), selected))
+            old_samples.append(subsample_dataset(cls_subset, selected))
         session_old_dataset = subDataset_wholeDataset(old_samples)
 
         novel_samples = []
         for novel_cls in session_novel_class_map[session]:
             novel_subset = subsample_classes(deepcopy(train_domain_dataset), include_classes=[novel_cls])
             sample_count = config_dict['online_novel_unseen_num'] if novel_cls == novel_classes[session] else config_dict['online_novel_seen_num']
-            cls_idxs = novel_subset.data.index.tolist()
+            cls_idxs = list(range(len(novel_subset.data)))
             selected = np.random.choice(cls_idxs, min(sample_count, len(cls_idxs)), replace=False)
-            novel_samples.append(subsample_dataset(deepcopy(novel_subset), selected))
+            novel_samples.append(subsample_dataset(novel_subset, selected))
         session_novel_dataset = subDataset_wholeDataset(novel_samples)
 
         online_old_dataset_unlabelled_list.append(session_old_dataset)
@@ -164,11 +175,32 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
 
     return all_datasets, novel_targets_shuffle
 
+
+
 if __name__ == '__main__':
-    import os
+    from torchvision import transforms
 
+    dummy_transform = transforms.Compose([transforms.ToTensor()])
 
-    # 不用 transform
-    dataset = CustomCLEAR(root=clear_10_root, transform=None, split='test',domains=1)
-    print(f"Total samples: {len(dataset)}")
-    print(dataset.data)
+    config_dict = {
+        'continual_session_num': 3,
+        'online_novel_unseen_num': 300,
+        'online_old_seen_num': 50,
+        'online_novel_seen_num': 50,
+    }
+
+    all_datasets, novel_targets_shuffle = get_clear_datasets(
+        train_transform=dummy_transform,
+        test_transform=dummy_transform,
+        config_dict=config_dict,
+        is_shuffle=False
+    )
+
+    novel_datasets = all_datasets['online_novel_dataset_unlabelled_list']
+
+    for session_id, dataset in enumerate(novel_datasets):
+        print(f"\n[Session {session_id}] Online Novel Unlabelled Info")
+        class_counts = dataset.data['filepath'].apply(lambda p: os.path.basename(os.path.dirname(p)))
+        counts = class_counts.value_counts()
+        for class_name, count in counts.items():
+            print(f"Class: {class_name}, Count: {count}")
