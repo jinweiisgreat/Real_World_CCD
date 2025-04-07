@@ -230,14 +230,14 @@ def get_cifar_10_datasets(train_transform, test_transform, config_dict, train_cl
 
 # cifar100 dataset for Continual-GCD
 def get_cifar_100_datasets(train_transform, test_transform, config_dict, train_classes=range(80),
-                           prop_train_labels=0.8, split_train_val=False, is_shuffle=False, seed=0):
+                           prop_train_labels=0.8, split_train_val=False, is_shuffle=False, seed=0, test_mode = None):
     continual_session_num = config_dict['continual_session_num']
     online_novel_unseen_num = config_dict['online_novel_unseen_num']
     online_old_seen_num = config_dict['online_old_seen_num']
     online_novel_seen_num = config_dict['online_novel_seen_num']
 
     # Init entire training set
-    whole_training_set = CustomCIFAR100(root=cifar_10_root, transform=train_transform, train=True)
+    whole_training_set = CustomCIFAR100(root=cifar_100_root, transform=train_transform, train=True)
 
     # Get labelled training set which has subsampled classes, then subsample some indices from that
     old_dataset_all = subsample_classes(deepcopy(whole_training_set), include_classes=train_classes)  # 40000
@@ -266,7 +266,7 @@ def get_cifar_100_datasets(train_transform, test_transform, config_dict, train_c
         [offline_train_dataset_samples[cls] for cls in range(len(list(train_classes)))])   # 32000   # NOTE!!!
 
     # Get test set for all classes
-    test_dataset = CustomCIFAR100(root=cifar_10_root, transform=test_transform, train=False)  # 10000
+    test_dataset = CustomCIFAR100(root=cifar_100_root, transform=test_transform, train=False)  # 10000
     # offline test dataset
     offline_test_dataset = subsample_classes(deepcopy(test_dataset), include_classes=list(train_classes))
 
@@ -344,15 +344,15 @@ if __name__ == '__main__':
     train_transform = transforms.ToTensor()
     test_transform = transforms.ToTensor()
 
-    # 打印 CIFAR-10 数据集信息
-    print("========== CIFAR-10 ==========")
-    cifar10_dataset = CustomCIFAR10(root=cifar_10_root, train=True, download=True, transform=train_transform)
-    print(f"Train Data Shape: {cifar10_dataset.data.shape}")
-    print(f"Number of Training Samples: {len(cifar10_dataset)}")
-    print(f"Number of Classes: {len(set(cifar10_dataset.targets))}")
+    # 打印 CIFAR-100 数据集信息
+    print("========== CIFAR-100 ==========")
+    cifar100_dataset = CustomCIFAR100(root=cifar_100_root, train=True, download=True, transform=train_transform)
+    print(f"Train Data Shape: {cifar100_dataset.data.shape}")
+    print(f"Number of Training Samples: {len(cifar100_dataset)}")
+    print(f"Number of Classes: {len(set(cifar100_dataset.targets))}")
     print(f"Class Distribution:")
     from collections import Counter
-    print(Counter(cifar10_dataset.targets))
+    print(Counter(cifar100_dataset.targets))
 
-    print(cifar10_dataset)
+    print(cifar100_dataset)
 

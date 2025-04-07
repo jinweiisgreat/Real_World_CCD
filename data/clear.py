@@ -91,6 +91,32 @@ def subDataset_wholeDataset(datalist):
     whole.uq_idxs = np.concatenate([d.uq_idxs for d in datalist], axis=0)
     return whole
 
+def subsample_per_class(dataset, num_samples=100, seed=0):
+    """
+    针对某个 `CustomCLEAR` 数据集，对每个类别只保留最多 `num_samples` 条样本
+    并返回一个新的（或就地修改的）dataset。
+    """
+    # 为了可复现，可以手动设置随机种子
+    np.random.seed(seed)
+
+    # dataset.data 是一个 pandas DataFrame，包含 "target" 列
+    df = dataset.data
+    new_idxs = []
+
+    # 按照 'target' 分组，每个类只保留指定数量的样本
+    grouped = df.groupby('target')
+    for cls, group_df in grouped:
+        all_indices = group_df.index.values
+        if len(all_indices) > num_samples:
+            selected = np.random.choice(all_indices, size=num_samples, replace=False)
+        else:
+            selected = all_indices
+        new_idxs.extend(selected)
+
+    # 使用 subsample_dataset 来根据 new_idxs 进行真正的子集裁剪
+    dataset = subsample_dataset(dataset, new_idxs)
+    return dataset
+
 
 def get_clear_datasets(train_transform, test_transform, config_dict,
                        train_classes=(0, 1, 2, 3, 4, 5, 6),
@@ -99,7 +125,8 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
                        split_train_val=False,
                        is_shuffle=False, seed=0,
                        test_mode='current_session',
-                       root=clear_10_root):
+                       root=clear_10_root,
+                       max_test_per_class=100):
 
     continual_session_num = config_dict.get('continual_session_num', 3)
     if seed is not None:
@@ -107,11 +134,19 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
 
     class_to_id = build_class_mapping(root, split='train', domain=1)
 
+    # -----------------------------
+    # 1) 构造离线训练/测试集
+    # -----------------------------
+
     train_dataset = CustomCLEAR(root=root, split='train', domains=[1], transform=train_transform, class_to_id=class_to_id)
     offline_train_dataset = subsample_classes(deepcopy(train_dataset), include_classes=train_classes)
 
     test_dataset = CustomCLEAR(root=root, split='test', domains=[1], transform=test_transform, class_to_id=class_to_id)
     offline_test_dataset = subsample_classes(deepcopy(test_dataset), include_classes=train_classes)
+
+    # -----------------------------
+    # 2) 确定各 session 的新类
+    # -----------------------------
 
     session_novel_class_map = {
         0: [novel_classes[0]],
@@ -124,6 +159,10 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
     online_novel_dataset_unlabelled_list = []
     online_test_dataset_list = []
     cumulative_test_datasets = [offline_test_dataset]
+
+    # -----------------------------
+    # 3) 构造每个 session 的数据集
+    # -----------------------------
 
     for session in range(continual_session_num):
         domain_id = session + 2
@@ -157,6 +196,8 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
         if test_mode == 'cumulative_session':
             cumulative_test_datasets.append(session_test_dataset)
             combined = subDataset_wholeDataset(cumulative_test_datasets)
+            if max_test_per_class is not None:
+                combined = subsample_per_class(combined, num_samples=max_test_per_class, seed=seed)
             online_test_dataset_list.append(combined)
         else:
             online_test_dataset_list.append(session_test_dataset)
@@ -177,6 +218,7 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
 
 
 
+# Example usage"""
 if __name__ == '__main__':
     from torchvision import transforms
 
@@ -204,3 +246,4 @@ if __name__ == '__main__':
         counts = class_counts.value_counts()
         for class_name, count in counts.items():
             print(f"Class: {class_name}, Count: {count}")
+"""

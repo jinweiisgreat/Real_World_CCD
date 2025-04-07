@@ -334,10 +334,8 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
     args.best_test_acc_unseen_list.append(best_test_acc_unseen)
 
 
-
 def test_online(model, test_loader, epoch, save_name, args):
-
-# ============================ 打印测试集信息 ============================
+    # ============================ 打印测试集信息 ============================
 
     def print_testset_info(test_loader, class_names=None, prefix=""):
         all_labels = []
@@ -352,7 +350,7 @@ def test_online(model, test_loader, epoch, save_name, args):
         print(f"  总测试样本: {len(all_labels)}")
 
     print_testset_info(test_loader, class_names=getattr(args, 'class_names', None), prefix="Online")
-# ============================ 打印测试集信息 完毕============================
+    # ============================ 打印测试集信息 完毕============================
 
     model.eval()
 
@@ -368,10 +366,10 @@ def test_online(model, test_loader, epoch, save_name, args):
 
             # args.train_classes 原始训练时定义的类别
             mask_hard = np.append(mask_hard, np.array([True if x.item() in range(len(args.train_classes))
-                                         else False for x in label]))
+                                                       else False for x in label]))
             # args.num_seen_classes 当前已见类别范围
             mask_soft = np.append(mask_soft, np.array([True if x.item() in range(args.num_seen_classes)
-                                         else False for x in label]))
+                                                       else False for x in label]))
 
     preds = np.concatenate(preds)
     targets = np.concatenate(targets)
@@ -384,21 +382,117 @@ def test_online(model, test_loader, epoch, save_name, args):
                                                     args=args)
 
     all_acc_soft, seen_acc, unseen_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_soft,
-                                                    T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
-                                                    args=args)
-    # 打印参与 Unseen 计算的类
-    # unseen_labels = np.array(targets)[~mask_soft.astype(bool)]
-    # unseen_class_ids, counts = np.unique(unseen_labels, return_counts=True)
-    # unseen_class_ids = unseen_class_ids.tolist()
-    # counts = counts.tolist()
+                                                             T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
+                                                             args=args)
+
+    # # --------- 改进的手动计算方法 ---------
+    # from scipy.optimize import linear_sum_assignment
     #
-    # unseen_class_names = [str(cls_id) for cls_id in unseen_class_ids]
+    # # 将数据分为已见和未见类别
+    # seen_mask = mask_soft.astype(bool)
+    # unseen_mask = ~seen_mask
     #
-    # args.logger.info("\n参与 Unseen 计算的类 (Soft Mask = False):")
-    # for cls_id, cls_name, count in zip(unseen_class_ids, unseen_class_names, counts):
-    #     args.logger.info(f"  类别 ID: {cls_id} 名称: {cls_name} -> 样本数: {count}")
-    # args.logger.info(f"总 Unseen 类数: {len(unseen_class_ids)}")
-    # args.logger.info(f"总 Unseen 样本数: {len(unseen_labels)}")
+    # seen_preds = preds[seen_mask]
+    # seen_targets = targets[seen_mask]
+    # unseen_preds = preds[unseen_mask]
+    # unseen_targets = targets[unseen_mask]
+    #
+    # # 为已见类别构建混淆矩阵和映射
+    # seen_classes_pred = np.unique(seen_preds)
+    # seen_classes_target = np.unique(seen_targets)
+    # seen_classes = np.union1d(seen_classes_pred, seen_classes_target)
+    #
+    # seen_class_to_idx = {c: i for i, c in enumerate(seen_classes)}
+    # seen_w = np.zeros((len(seen_classes), len(seen_classes)), dtype=int)
+    #
+    # for i in range(len(seen_preds)):
+    #     pred_idx = seen_class_to_idx[seen_preds[i]]
+    #     target_idx = seen_class_to_idx[seen_targets[i]]
+    #     seen_w[pred_idx, target_idx] += 1
+    #
+    # seen_row_ind, seen_col_ind = linear_sum_assignment(seen_w.max() - seen_w)
+    # seen_map = {seen_classes[i]: seen_classes[j] for i, j in zip(seen_row_ind, seen_col_ind)}
+    #
+    # # 如果有未见类别，为它们构建单独的映射
+    # unseen_map = {}
+    # if len(unseen_preds) > 0:
+    #     unseen_classes_pred = np.unique(unseen_preds)
+    #     unseen_classes_target = np.unique(unseen_targets)
+    #
+    #     # 为未见类别创建频率矩阵
+    #     unseen_w = np.zeros((len(unseen_classes_pred), len(unseen_classes_target)), dtype=int)
+    #     unseen_pred_to_idx = {c: i for i, c in enumerate(unseen_classes_pred)}
+    #     unseen_target_to_idx = {c: i for i, c in enumerate(unseen_classes_target)}
+    #
+    #     for i in range(len(unseen_preds)):
+    #         pred_idx = unseen_pred_to_idx[unseen_preds[i]]
+    #         target_idx = unseen_target_to_idx[unseen_targets[i]]
+    #         unseen_w[pred_idx, target_idx] += 1
+    #
+    #     # 应用匈牙利算法找到最佳映射
+    #     if unseen_w.size > 0:
+    #         unseen_row_ind, unseen_col_ind = linear_sum_assignment(unseen_w.max() - unseen_w)
+    #         for i, j in zip(unseen_row_ind, unseen_col_ind):
+    #             pred_class = unseen_classes_pred[i]
+    #             target_class = unseen_classes_target[j]
+    #             # 只有当映射有足够支持时才添加
+    #             if unseen_w[i, j] > 0:
+    #                 unseen_map[pred_class] = target_class
+    #
+    # # 合并映射
+    # class_map = {**seen_map, **unseen_map}
+    #
+    # # 应用映射到整个预测集
+    # remapped_preds = np.array([class_map.get(p, p) for p in preds])
+    #
+    # # 计算准确率
+    # all_correct = np.sum(remapped_preds == targets)
+    # all_total = len(targets)
+    # all_Acc = all_correct / all_total
+    #
+    # # 计算旧类(mask_hard)准确率
+    # old_mask = mask_hard.astype(bool)
+    # old_preds = remapped_preds[old_mask]
+    # old_targets = targets[old_mask]
+    # old_correct = np.sum(old_preds == old_targets)
+    # old_total = len(old_targets)
+    # old_Acc = old_correct / max(old_total, 1)
+    #
+    # # 计算新类准确率
+    # new_mask = ~old_mask
+    # new_preds = remapped_preds[new_mask]
+    # new_targets = targets[new_mask]
+    # new_correct = np.sum(new_preds == new_targets)
+    # new_total = len(new_targets)
+    # new_Acc = new_correct / max(new_total, 1)
+    #
+    # # 计算已见类准确率
+    # seen_preds_remapped = remapped_preds[seen_mask]
+    # seen_correct = np.sum(seen_preds_remapped == seen_targets)
+    # seen_total = len(seen_targets)
+    # seen_Acc = seen_correct / max(seen_total, 1)
+    #
+    # # 计算未见类准确率
+    # unseen_preds_remapped = remapped_preds[unseen_mask]
+    # unseen_correct = np.sum(unseen_preds_remapped == unseen_targets)
+    # unseen_total = len(unseen_targets)
+    # unseen_Acc = unseen_correct / max(unseen_total, 1)
+    #
+    # # 记录和输出结果
+    # args.logger.info(f"我的计算结果:")
+    # args.logger.info(f"All: {all_Acc:.4f}")
+    # args.logger.info(f"Old: {old_Acc:.4f}")
+    # args.logger.info(f"New: {new_Acc:.4f}")
+    # args.logger.info(f"Seen: {seen_Acc:.4f}")
+    # args.logger.info(f"Unseen: {unseen_Acc:.4f}")
+    #
+    # # 与官方结果比较
+    # args.logger.info(f"官方计算结果:")
+    # args.logger.info(f"All: {all_acc:.4f}")
+    # args.logger.info(f"Old: {old_acc:.4f}")
+    # args.logger.info(f"New: {new_acc:.4f}")
+    # args.logger.info(f"Seen: {seen_acc:.4f}")
+    # args.logger.info(f"Unseen: {unseen_acc:.4f}")
 
     return all_acc, old_acc, new_acc, all_acc_soft, seen_acc, unseen_acc
 '''====================================================================================================================='''
