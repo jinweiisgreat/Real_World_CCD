@@ -217,8 +217,8 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
     return all_datasets, novel_targets_shuffle
 
 
-
-# Example usage"""
+# Example usage
+"""
 if __name__ == '__main__':
     from torchvision import transforms
 
