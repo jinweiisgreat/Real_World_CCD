@@ -91,42 +91,6 @@ def subDataset_wholeDataset(datalist):
     whole.uq_idxs = np.concatenate([d.uq_idxs for d in datalist], axis=0)
     return whole
 
-
-def sample_balanced_test_set(dataset, class_list, samples_per_class=100):
-    """
-    为每个类别采样相同数量的样本，创建平衡的测试集
-
-    参数:
-    - dataset: 源数据集
-    - class_list: 需要采样的类别列表
-    - samples_per_class: 每个类别要采样的样本数
-
-    返回:
-    - 采样后的数据集
-    """
-    sampled_datasets = []
-
-    for cls in class_list:
-        # 为当前类创建一个子集
-        cls_subset = subsample_classes(deepcopy(dataset), include_classes=[cls])
-
-        # 获取可用样本数
-        available_samples = len(cls_subset.data)
-
-        # 确定要采样的样本数 (不超过可用样本数)
-        n_samples = min(samples_per_class, available_samples)
-
-        if n_samples < available_samples:
-            # 随机选择索引
-            selected_indices = np.random.choice(available_samples, n_samples, replace=False)
-            cls_subset = subsample_dataset(cls_subset, selected_indices)
-
-        sampled_datasets.append(cls_subset)
-
-    # 合并所有类别的采样结果
-    return subDataset_wholeDataset(sampled_datasets)
-
-
 def get_clear_datasets(train_transform, test_transform, config_dict,
                        train_classes=(0, 1, 2, 3, 4, 5, 6),
                        novel_classes=(7, 8, 9),
@@ -134,8 +98,7 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
                        split_train_val=False,
                        is_shuffle=False, seed=0,
                        test_mode='current_session',
-                       root=clear_10_root,
-                       test_samples_per_class=100):  # 添加新参数控制测试集每类样本数
+                       root=clear_10_root):
 
     continual_session_num = config_dict.get('continual_session_num', 3)
     if seed is not None:
@@ -147,18 +110,11 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
     # 1) 构造离线训练/测试集
     # -----------------------------
 
-    train_dataset = CustomCLEAR(root=root, split='train', domains=[1], transform=train_transform,
-                                class_to_id=class_to_id)
+    train_dataset = CustomCLEAR(root=root, split='train', domains=[1], transform=train_transform, class_to_id=class_to_id)
     offline_train_dataset = subsample_classes(deepcopy(train_dataset), include_classes=train_classes)
 
     test_dataset = CustomCLEAR(root=root, split='test', domains=[1], transform=test_transform, class_to_id=class_to_id)
-
-    # 为测试集创建平衡的子集
-    offline_test_dataset = sample_balanced_test_set(
-        subsample_classes(deepcopy(test_dataset), include_classes=train_classes),
-        train_classes,
-        test_samples_per_class
-    )
+    offline_test_dataset = subsample_classes(deepcopy(test_dataset), include_classes=train_classes)
 
     # -----------------------------
     # 2) 确定各 session 的新类
@@ -169,6 +125,7 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
         1: [novel_classes[0], novel_classes[1]],
         2: list(novel_classes)
     }
+
 
     online_old_dataset_unlabelled_list = []
     online_novel_dataset_unlabelled_list = []
@@ -181,10 +138,8 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
 
     for session in range(continual_session_num):
         domain_id = session + 2
-        train_domain_dataset = CustomCLEAR(root=root, split='train', domains=[domain_id], transform=train_transform,
-                                           class_to_id=class_to_id)
-        test_domain_dataset = CustomCLEAR(root=root, split='test', domains=[domain_id], transform=test_transform,
-                                          class_to_id=class_to_id)
+        train_domain_dataset = CustomCLEAR(root=root, split='train', domains=[domain_id], transform=train_transform, class_to_id=class_to_id)
+        test_domain_dataset = CustomCLEAR(root=root, split='test', domains=[domain_id], transform=test_transform, class_to_id=class_to_id)
 
         old_samples = []
         for cls in train_classes:
@@ -198,8 +153,7 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
         novel_samples = []
         for novel_cls in session_novel_class_map[session]:
             novel_subset = subsample_classes(deepcopy(train_domain_dataset), include_classes=[novel_cls])
-            sample_count = config_dict['online_novel_unseen_num'] if novel_cls == novel_classes[session] else \
-            config_dict['online_novel_seen_num']
+            sample_count = config_dict['online_novel_unseen_num'] if novel_cls == novel_classes[session] else config_dict['online_novel_seen_num']
             cls_idxs = list(range(len(novel_subset.data)))
             selected = np.random.choice(cls_idxs, min(sample_count, len(cls_idxs)), replace=False)
             novel_samples.append(subsample_dataset(novel_subset, selected))
@@ -209,36 +163,12 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
         online_novel_dataset_unlabelled_list.append(session_novel_dataset)
 
         test_classes = list(train_classes) + session_novel_class_map[session]
-
-        # 创建平衡的测试集
-        session_test_dataset = sample_balanced_test_set(
-            subsample_classes(deepcopy(test_domain_dataset), include_classes=test_classes),
-            test_classes,
-            test_samples_per_class
-        )
+        session_test_dataset = subsample_classes(deepcopy(test_domain_dataset), include_classes=test_classes)
 
         if test_mode == 'cumulative_session':
-            # 注意：每次添加新的测试集时，我们需要重新平衡已知类的样本数
-            # 因此，不是简单地添加新的测试集，而是重新从所有可用测试集中抽样
-            all_test_classes = list(train_classes) + session_novel_class_map[session]
-
-            # 收集当前所有测试域的数据
-            all_test_domain_datasets = [
-                CustomCLEAR(root=root, split='test', domains=[d + 1], transform=test_transform, class_to_id=class_to_id)
-                for d in range(session + 1)
-            ]
-
-            # 合并所有域的测试数据
-            merged_test_dataset = subDataset_wholeDataset(all_test_domain_datasets)
-
-            # 创建平衡的累积测试集
-            balanced_cumulative_test = sample_balanced_test_set(
-                subsample_classes(deepcopy(merged_test_dataset), include_classes=all_test_classes),
-                all_test_classes,
-                test_samples_per_class
-            )
-
-            online_test_dataset_list.append(balanced_cumulative_test)
+            cumulative_test_datasets.append(session_test_dataset)
+            combined = subDataset_wholeDataset(cumulative_test_datasets)
+            online_test_dataset_list.append(combined)
         else:
             online_test_dataset_list.append(session_test_dataset)
 
@@ -255,3 +185,35 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
         np.random.shuffle(novel_targets_shuffle)
 
     return all_datasets, novel_targets_shuffle
+
+
+# Example usage
+"""
+if __name__ == '__main__':
+    from torchvision import transforms
+
+    dummy_transform = transforms.Compose([transforms.ToTensor()])
+
+    config_dict = {
+        'continual_session_num': 3,
+        'online_novel_unseen_num': 300,
+        'online_old_seen_num': 50,
+        'online_novel_seen_num': 50,
+    }
+
+    all_datasets, novel_targets_shuffle = get_clear_datasets(
+        train_transform=dummy_transform,
+        test_transform=dummy_transform,
+        config_dict=config_dict,
+        is_shuffle=False
+    )
+
+    novel_datasets = all_datasets['online_novel_dataset_unlabelled_list']
+
+    for session_id, dataset in enumerate(novel_datasets):
+        print(f"\n[Session {session_id}] Online Novel Unlabelled Info")
+        class_counts = dataset.data['filepath'].apply(lambda p: os.path.basename(os.path.dirname(p)))
+        counts = class_counts.value_counts()
+        for class_name, count in counts.items():
+            print(f"Class: {class_name}, Count: {count}")
+"""
