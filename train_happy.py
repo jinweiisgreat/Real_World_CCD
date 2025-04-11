@@ -67,7 +67,7 @@ def train_offline(student, train_loader, test_loader, args):
             student_proj, student_out = student(images)
             teacher_out = student_out.detach()
 
-            # clustering, sup
+            # clusterin，g, sup
             sup_logits = torch.cat([f[mask_lab] for f in (student_out / 0.1).chunk(2)], dim=0)
             sup_labels = torch.cat([class_labels[mask_lab] for _ in range(2)], dim=0)
             cls_loss = nn.CrossEntropyLoss()(sup_logits, sup_labels)
@@ -832,27 +832,50 @@ if __name__ == "__main__":
             ####################################################################################################################
             backbone_cur = deepcopy(backbone)   # NOTE!!!
             backbone_cur.load_state_dict(model_pre[0].state_dict())   # NOTE!!!
-            args.mlp_out_dim_cur = args.num_labeled_classes + args.num_cur_novel_classes   # total num of classes in the current session
+            args.mlp_out_dim_cur = args.num_labeled_classes + args.num_cur_novel_classes   # total num of classes in the current session 拓展分类器，添加输出结点
             args.logger.info('number of all class (old + all new) in current session: {}'.format(args.mlp_out_dim_cur))
             projector_cur = DINOHead(in_dim=args.feat_dim, out_dim=args.mlp_out_dim_cur, nlayers=args.num_mlp_layers)
             args.logger.info('transferring classification head of seen classes...')
+
+            # ==============================================================
+            # 权重迁移，模型从一个session进入下一个session时，需要扩展分类器以容纳新类别，同时保留对已见类别的知识；直接转移上一个模型中已知类的分类器权重，保证已知类的知识不会丢失
+            # transfer seen classes' weights
+            # ==============================================================
             projector_cur.last_layer.weight_v.data[:args.num_seen_classes] = projector_pre.last_layer.weight_v.data[:args.num_seen_classes]   # NOTE!!!
             projector_cur.last_layer.weight_g.data[:args.num_seen_classes] = projector_pre.last_layer.weight_g.data[:args.num_seen_classes]   # NOTE!!!
             projector_cur.last_layer.weight.data[:args.num_seen_classes] = projector_pre.last_layer.weight.data[:args.num_seen_classes]   # NOTE!!!
             # initialize new class heads
             #############################################
             online_session_train_dataset_for_new_head_init = deepcopy(online_session_train_dataset)
+
+            # 使用测试变换而非训练变换的原因：初始化分类器头需要稳定、干净的特征表示，不需要训练时的数据增强
+
             online_session_train_dataset_for_new_head_init.old_unlabelled_dataset.transform = test_transform   # NOTE!!!
             online_session_train_dataset_for_new_head_init.novel_unlabelled_dataset.transform = test_transform   # NOTE!!!
             online_session_train_loader_for_new_head_init = DataLoader(online_session_train_dataset_for_new_head_init, num_workers=args.num_workers_test,
                                                                     batch_size=256, shuffle=False, pin_memory=False)
             if args.init_new_head:
                 new_head = get_kmeans_centroid_for_new_head(model_pre, online_session_train_loader_for_new_head_init, args, device)   # torch.Size([10, 768])
+
+
+                """
+                projector_cur.last_layer.weight_v.data[args.num_seen_classes:] 这部分就是指向分类器中为新类别预留的权重部分。
+                在执行K-means初始化之前，这些权重是通过标准的随机初始化方法（如PyTorch默认的初始化）创建的。
+                这行代码实际上是在:
+                1. 对每个新类别位置的随机初始化权重向量计算范数（向量长度）
+                2. 对所有这些范数求平均值
+                然后使用这个平均范数来缩放通过K-means获得的新类别表示，使得替换后的权重在数值规模上与随机初始化的权重相似。
+                这是一种确保新权重与网络其他部分在数值上兼容的技巧，有助于保持训练过程的稳定性。
+                """
+
+                # 保持范数一致性：通过计算这些初始随机权重的平均范数，然后用同样的范数来缩放K-means得到的新类别质心，确保新初始化的权重与分类器其他部分具有相似的规模。
                 norm_new_head_weight_v = torch.norm(projector_cur.last_layer.weight_v.data[args.num_seen_classes:], dim=-1).mean()
                 norm_new_head_weight = torch.norm(projector_cur.last_layer.weight.data[args.num_seen_classes:], dim=-1).mean()
                 new_head_weight_v = new_head * norm_new_head_weight_v
                 new_head_weight = new_head * norm_new_head_weight
                 args.logger.info('initializing classification head of unseen novel classes...')
+
+                # 只更新新类别的部分，保留已知类别的权重不变
                 projector_cur.last_layer.weight_v.data[args.num_seen_classes:] = new_head_weight_v.data   # NOTE!!!   # copy
                 projector_cur.last_layer.weight.data[args.num_seen_classes:] = new_head_weight.data   # NOTE!!!
             ##############################################

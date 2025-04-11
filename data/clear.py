@@ -85,46 +85,30 @@ def subsample_classes(dataset, include_classes):
     return dataset
 
 
+def subsample_classes_balanced(dataset, include_classes, samples_per_class=100):
+    """平衡采样每个类别的样本数量"""
+    include_classes = np.array(include_classes)
+    target_xform_dict = {k: i for i, k in enumerate(include_classes)}
+
+    selected_idxs = []
+    for cls in include_classes:
+        cls_idxs = [i for i, (_, row) in enumerate(dataset.data.iterrows()) if row['target'] == cls]
+        if len(cls_idxs) > samples_per_class:
+            selected = np.random.choice(cls_idxs, samples_per_class, replace=False)
+            selected_idxs.extend(selected)
+        else:
+            selected_idxs.extend(cls_idxs)  # 如果样本不足，全部使用
+
+    dataset = subsample_dataset(dataset, selected_idxs)
+    dataset.target_transform = lambda x: target_xform_dict[x]
+    return dataset
+
+
 def subDataset_wholeDataset(datalist):
     whole = deepcopy(datalist[0])
     whole.data = pd.concat([d.data for d in datalist], axis=0).reset_index(drop=True)
     whole.uq_idxs = np.concatenate([d.uq_idxs for d in datalist], axis=0)
     return whole
-
-
-def sample_balanced_test_set(dataset, class_list, samples_per_class=100):
-    """
-    为每个类别采样相同数量的样本，创建平衡的测试集
-
-    参数:
-    - dataset: 源数据集
-    - class_list: 需要采样的类别列表
-    - samples_per_class: 每个类别要采样的样本数
-
-    返回:
-    - 采样后的数据集
-    """
-    sampled_datasets = []
-
-    for cls in class_list:
-        # 为当前类创建一个子集
-        cls_subset = subsample_classes(deepcopy(dataset), include_classes=[cls])
-
-        # 获取可用样本数
-        available_samples = len(cls_subset.data)
-
-        # 确定要采样的样本数 (不超过可用样本数)
-        n_samples = min(samples_per_class, available_samples)
-
-        if n_samples < available_samples:
-            # 随机选择索引
-            selected_indices = np.random.choice(available_samples, n_samples, replace=False)
-            cls_subset = subsample_dataset(cls_subset, selected_indices)
-
-        sampled_datasets.append(cls_subset)
-
-    # 合并所有类别的采样结果
-    return subDataset_wholeDataset(sampled_datasets)
 
 
 def get_clear_datasets(train_transform, test_transform, config_dict,
@@ -135,7 +119,8 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
                        is_shuffle=False, seed=0,
                        test_mode='current_session',
                        root=clear_10_root,
-                       test_samples_per_class=100):  # 添加新参数控制测试集每类样本数
+                       balance_test_samples=True,  # 新增参数，控制是否平衡测试样本
+                       samples_per_class=100):  # 新增参数，每类采样数量
 
     continual_session_num = config_dict.get('continual_session_num', 3)
     if seed is not None:
@@ -153,12 +138,12 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
 
     test_dataset = CustomCLEAR(root=root, split='test', domains=[1], transform=test_transform, class_to_id=class_to_id)
 
-    # 为测试集创建平衡的子集
-    offline_test_dataset = sample_balanced_test_set(
-        subsample_classes(deepcopy(test_dataset), include_classes=train_classes),
-        train_classes,
-        test_samples_per_class
-    )
+    # 根据balance_test_samples参数决定是否平衡采样测试集
+    if balance_test_samples:
+        offline_test_dataset = subsample_classes_balanced(deepcopy(test_dataset), include_classes=train_classes,
+                                                          samples_per_class=samples_per_class)
+    else:
+        offline_test_dataset = subsample_classes(deepcopy(test_dataset), include_classes=train_classes)
 
     # -----------------------------
     # 2) 确定各 session 的新类
@@ -210,35 +195,41 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
 
         test_classes = list(train_classes) + session_novel_class_map[session]
 
-        # 创建平衡的测试集
-        session_test_dataset = sample_balanced_test_set(
-            subsample_classes(deepcopy(test_domain_dataset), include_classes=test_classes),
-            test_classes,
-            test_samples_per_class
-        )
+        # 对测试集应用平衡采样
+        if balance_test_samples:
+            session_test_dataset = subsample_classes_balanced(deepcopy(test_domain_dataset),
+                                                              include_classes=test_classes,
+                                                              samples_per_class=samples_per_class)
+        else:
+            session_test_dataset = subsample_classes(deepcopy(test_domain_dataset), include_classes=test_classes)
 
         if test_mode == 'cumulative_session':
-            # 注意：每次添加新的测试集时，我们需要重新平衡已知类的样本数
-            # 因此，不是简单地添加新的测试集，而是重新从所有可用测试集中抽样
-            all_test_classes = list(train_classes) + session_novel_class_map[session]
+            cumulative_test_datasets.append(session_test_dataset)
 
-            # 收集当前所有测试域的数据
-            all_test_domain_datasets = [
-                CustomCLEAR(root=root, split='test', domains=[d + 1], transform=test_transform, class_to_id=class_to_id)
-                for d in range(session + 1)
-            ]
+            # 当使用cumulative_session模式且启用平衡采样时，对累积数据集重新平衡
+            if balance_test_samples:
+                # 创建一个临时的合并数据集
+                combined_temp = subDataset_wholeDataset(cumulative_test_datasets)
 
-            # 合并所有域的测试数据
-            merged_test_dataset = subDataset_wholeDataset(all_test_domain_datasets)
+                # 对合并后的数据集按类别进行平衡采样
+                balanced_combined = CustomCLEAR(root=root, split='test', domains=[1],
+                                                transform=test_transform, class_to_id=class_to_id)
+                balanced_combined.data = combined_temp.data.copy()
+                balanced_combined.uq_idxs = combined_temp.uq_idxs.copy()
 
-            # 创建平衡的累积测试集
-            balanced_cumulative_test = sample_balanced_test_set(
-                subsample_classes(deepcopy(merged_test_dataset), include_classes=all_test_classes),
-                all_test_classes,
-                test_samples_per_class
-            )
+                # 获取当前所有类别
+                all_classes = list(train_classes) + session_novel_class_map[session]
 
-            online_test_dataset_list.append(balanced_cumulative_test)
+                # 平衡采样
+                balanced_combined = subsample_classes_balanced(balanced_combined,
+                                                               include_classes=all_classes,
+                                                               samples_per_class=samples_per_class)
+
+                online_test_dataset_list.append(balanced_combined)
+            else:
+                # 如果不平衡采样，则使用原来的方法
+                combined = subDataset_wholeDataset(cumulative_test_datasets)
+                online_test_dataset_list.append(combined)
         else:
             online_test_dataset_list.append(session_test_dataset)
 
@@ -255,3 +246,35 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
         np.random.shuffle(novel_targets_shuffle)
 
     return all_datasets, novel_targets_shuffle
+
+# Example usage
+
+if __name__ == '__main__':
+    from torchvision import transforms
+
+    dummy_transform = transforms.Compose([transforms.ToTensor()])
+
+    config_dict = {
+        'continual_session_num': 3,
+        'online_novel_unseen_num': 300,
+        'online_old_seen_num': 50,
+        'online_novel_seen_num': 50,
+    }
+
+    all_datasets, novel_targets_shuffle = get_clear_datasets(
+        train_transform=dummy_transform,
+        test_transform=dummy_transform,
+        config_dict=config_dict,
+        balance_test_samples=True,  # 启用平衡采样
+        samples_per_class=100,      # 每类样本数设为100
+        test_mode='cumulative_session'
+    )
+
+    novel_datasets = all_datasets['online_novel_dataset_unlabelled_list']
+
+    for session_id, dataset in enumerate(novel_datasets):
+        print(f"\n[Session {session_id}] Online Novel Unlabelled Info")
+        class_counts = dataset.data['filepath'].apply(lambda p: os.path.basename(os.path.dirname(p)))
+        counts = class_counts.value_counts()
+        for class_name, count in counts.items():
+            print(f"Class: {class_name}, Count: {count}")
