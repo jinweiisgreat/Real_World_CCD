@@ -45,9 +45,13 @@ def get_kmeans_centroid_for_new_head(model, online_session_train_loader, args, d
     centroids = torch.nn.functional.normalize(centroids, dim=-1)   # torch.Size([60, 768])
     #centroids = centroids.float()
     with torch.no_grad():
+        """
+        model[1]内部的last_layer计算质心向量与已知类别原型间的余弦相似度
+        这产生logits张量，表示每个质心属于已知类别的可能性
+        """
         _, logits = model[1](centroids)   # torch.Size([60, 50])
         max_logits, _ = torch.max(logits, dim=-1)   # torch.Size([60])
-        _, proto_idx = torch.topk(max_logits, k=args.num_novel_class_per_session, largest=False)   # torch.Size([10])
+        _, proto_idx = torch.topk(max_logits, k=args.num_novel_class_per_session, largest=False)   # torch.Size([10]) 当largest=False时，返回最小的k个元素
         new_head = centroids[proto_idx]   # torch.Size([10, 768])
 
     return new_head

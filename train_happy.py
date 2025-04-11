@@ -721,7 +721,7 @@ if __name__ == "__main__":
 
         '''Continual GCD sessions'''
         #for session in range(args.continual_session_num):
-        for session in range(start_session, args.continual_session_num):
+        for session in range(start_session, args.continual_session_num): # cifar100: session 0->4
             args.logger.info('\n\n========== begin online continual session-{} ==============='.format(session+1))
             # dataset for the current session
             online_session_train_dataset = online_session_train_dataset_list[session]
@@ -732,7 +732,7 @@ if __name__ == "__main__":
                                                     batch_size=256, shuffle=False, pin_memory=False)
 
             # number of seen (offline old + previous online new) classes till the beginning of this session
-            args.num_seen_classes = args.num_labeled_classes + args.num_novel_class_per_session * session
+            args.num_seen_classes = args.num_labeled_classes + args.num_novel_class_per_session * session # example(cifar100)：session 1: old + 10*0 = 50 + 0 = 50
             args.logger.info('number of seen class (old + seen novel) at the beginning of current session: {}'.format(args.num_seen_classes))
             if args.dataset_name == 'cifar100':
                 args.num_cur_novel_classes = len(np.unique(online_session_train_dataset.novel_unlabelled_dataset.targets))
@@ -812,15 +812,15 @@ if __name__ == "__main__":
                 projector_pre = DINOHead(in_dim=args.feat_dim, out_dim=args.num_labeled_classes, nlayers=args.num_mlp_layers)
                 model_pre = nn.Sequential(backbone, projector_pre)
                 if args.load_offline_id is not None:
-                    load_dir_online = os.path.join(exp_root + '_' + 'offline', args.dataset_name, args.load_offline_id, 'checkpoints', 'model_best.pt')
+                    load_dir_online = os.path.join(exp_root + '_' + 'offline', args.dataset_name, args.load_offline_id, 'checkpoints', 'model_best.pt') # session 0 加载的是离线训练的模型
                     args.logger.info('loading offline checkpoints from: ' + load_dir_online)
                     load_dict = torch.load(load_dir_online)
                     model_pre.load_state_dict(load_dict['model'])
                     args.logger.info('successfully loaded checkpoints!')
-            else:        # session > 0:
+            else:        # session > 0
                 projector_pre = DINOHead(in_dim=args.feat_dim, out_dim=args.num_seen_classes, nlayers=args.num_mlp_layers)
                 model_pre = nn.Sequential(backbone, projector_pre)
-                load_dir_online = args.model_path[:-3] + '_session-' + str(session) + f'_best.pt'   # NOTE!!! session, best
+                load_dir_online = args.model_path[:-3] + '_session-' + str(session) + f'_best.pt'   # NOTE!!! session, best; 当 session=1 时，加载的是 session-1_best.pt（即session=0训练完成后保存的模型）
                 args.logger.info('loading checkpoints from last online session: ' + load_dir_online)
                 load_dict = torch.load(load_dir_online)
                 model_pre.load_state_dict(load_dict['model'])
@@ -838,6 +838,7 @@ if __name__ == "__main__":
             args.logger.info('transferring classification head of seen classes...')
 
             # ==============================================================
+            # 模型在每个新会话中都以上一个会话的知识为基础，同时扩展自身能力来适应新类别；
             # 权重迁移，模型从一个session进入下一个session时，需要扩展分类器以容纳新类别，同时保留对已见类别的知识；直接转移上一个模型中已知类的分类器权重，保证已知类的知识不会丢失
             # transfer seen classes' weights
             # ==============================================================
@@ -847,6 +848,11 @@ if __name__ == "__main__":
             # initialize new class heads
             #############################################
             online_session_train_dataset_for_new_head_init = deepcopy(online_session_train_dataset)
+            """
+            online_session_train_dataset
+            ├── old_unlabelled_dataset  // 包含旧类别的无标签数据
+            └── novel_unlabelled_dataset  // 包含新类别的无标签数据（包括已见类）
+            """
 
             # 使用测试变换而非训练变换的原因：初始化分类器头需要稳定、干净的特征表示，不需要训练时的数据增强
 
@@ -856,7 +862,6 @@ if __name__ == "__main__":
                                                                     batch_size=256, shuffle=False, pin_memory=False)
             if args.init_new_head:
                 new_head = get_kmeans_centroid_for_new_head(model_pre, online_session_train_loader_for_new_head_init, args, device)   # torch.Size([10, 768])
-
 
                 """
                 projector_cur.last_layer.weight_v.data[args.num_seen_classes:] 这部分就是指向分类器中为新类别预留的权重部分。
@@ -878,6 +883,11 @@ if __name__ == "__main__":
                 # 只更新新类别的部分，保留已知类别的权重不变
                 projector_cur.last_layer.weight_v.data[args.num_seen_classes:] = new_head_weight_v.data   # NOTE!!!   # copy
                 projector_cur.last_layer.weight.data[args.num_seen_classes:] = new_head_weight.data   # NOTE!!!
+                # 结合[:args.num_seen_classes]，projector_cur全部更新完
+                """
+                [:args.num_seen_classes]：已知类别的权重，这部分通过从 projector_pre 中直接复制完成更新。
+                [args.num_seen_classes:]：新类别的权重，这部分通过 K-means 初始化完成更新。
+                """
             ##############################################
 
             model_cur = nn.Sequential(backbone_cur, projector_cur)   # NOTE!!! backbone_cur

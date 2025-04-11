@@ -304,6 +304,11 @@ def get_cifar_100_datasets(train_transform, test_transform, config_dict, train_c
                                              for targets in online_session_targets]   # n * 500
 
         # randomly sample novel samples for each online session
+        """
+        条件 (s >= 1) and (i < s * targets_per_session) 判断类别是否为"已见过的新类别"
+        已见过的新类别（在之前会话中出现过）：采样 online_novel_seen_num 个样本（较少）
+        未见过的新类别（首次出现）：采样 online_novel_unseen_num 个样本（较多）
+        """
         online_session_each_novel_slices = []
         for i in range(len(online_session_targets)):
             if (s >= 1) and (i < s * targets_per_session):
