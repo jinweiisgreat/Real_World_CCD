@@ -706,7 +706,10 @@ if __name__ == "__main__":
         args.num_novel_class_per_session = args.num_unlabeled_classes // args.continual_session_num
         args.logger.info('number of novel class per session: {}'.format(args.num_novel_class_per_session))
 
-        '''v5: ProtoAug Manager'''
+        '''
+        v5: ProtoAug Manager
+        初始化一个ProtoAugManager实例
+        '''
         proto_aug_manager = ProtoAugManager(args.feat_dim, args.n_views*args.batch_size, args.hardness_temp, args.radius_scale, device, args.logger)
 
         # best test acc list across continual sessions
@@ -806,6 +809,8 @@ if __name__ == "__main__":
             ####################################################################################################################
 
             '''load ckpts from last session (session>0) or offline session (session=0)'''
+            '''确保每个新阶段都能从之前阶段学到的知识开始，而不是从头学习。'''
+
             ####################################################################################################################
             args.logger.info('loading checkpoints of model_pre...')
             if session == 0:

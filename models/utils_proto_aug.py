@@ -64,12 +64,21 @@ class ProtoAugManager:
         prototypes = F.normalize(self.prototypes, dim=-1, p=2).to(self.device)
 
         # hardness-aware sampling
+        # 通过hardness-aware sampling机制，使用 sampling_prob 来控制采样概率
+        # mean_similarity越高，表示原型之间越相似，采样概率越高，越需要关注这部分。
         sampling_prob = F.softmax(self.mean_similarity / self.hardness_temp, dim=-1)
         sampling_prob = sampling_prob.cpu().numpy()
         prototypes_labels = np.random.choice(len(prototypes), size=(self.batch_size,), replace=True, p=sampling_prob)
         prototypes_labels = torch.from_numpy(prototypes_labels).long().to(self.device)
 
         prototypes_sampled = prototypes[prototypes_labels]
+        """
+        这里生成的是以原型为中心，以 radius * radius_scale 为标准差的多元高斯随机向量。
+        它控制了在原型周围采样的范围大小。这样的分布模型使得系统能够生成与原始类别样本相似但又不完全相同的合成特征，用于保持模型对旧类别的记忆。
+        从一个以 prototypes_sampled 为中心的多元高斯分布中采样，并加上采样的噪声向量。
+        """
+        # 从分布中采样
+        # prototypes_augmented 包含了 batch_size 个样本
         prototypes_augmented = prototypes_sampled + torch.randn((self.batch_size, self.feature_dim), device=self.device) * self.radius * self.radius_scale
         #prototypes_augmented = F.normalize(prototypes_augmented, dim=-1, p=2) # NOTE!!! DO NOT normalize
         # forward prototypes and get logits
@@ -102,14 +111,17 @@ class ProtoAugManager:
             feats_c = all_feats[all_labels==c]
             feats_c_mean = torch.mean(feats_c, dim=0)
             prototypes_list.append(feats_c_mean)
-            feats_c_center = feats_c - feats_c_mean
-            cov = torch.matmul(feats_c_center.t(), feats_c_center) / len(feats_c_center)
-            radius = torch.trace(cov) / self.feature_dim   # or feats_c_center.shape[1]
+            feats_c_center = feats_c - feats_c_mean # 特征向量减去原型（中心化）
+            cov = torch.matmul(feats_c_center.t(), feats_c_center) / len(feats_c_center) # 计算协方差矩阵
+            radius = torch.trace(cov) / self.feature_dim   # or feats_c_center.shape[1] 协方差矩阵的平均特征值
             radius_list.append(radius)
         avg_radius = torch.sqrt(torch.mean(torch.stack(radius_list)))
         prototypes_all = torch.stack(prototypes_list, dim=0)
         prototypes_all = F.normalize(prototypes_all, dim=-1, p=2)
 
+        """
+        radius 衡量该类样本在特征空间中的分散程度;
+        """
         # update
         self.radius = avg_radius
         self.prototypes = prototypes_all
@@ -120,6 +132,9 @@ class ProtoAugManager:
             similarity[i,i] -= similarity[i,i]
         mean_similarity = torch.sum(similarity, dim=-1) / (len(similarity)-1)
 
+        """
+        每个原型（prototype）与其他所有原型之间的平均相似度
+        """
         self.mean_similarity = mean_similarity
 
 
