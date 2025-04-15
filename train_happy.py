@@ -221,12 +221,28 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
 
             # clustering, unsup
             cluster_loss = cluster_criterion(student_out, teacher_out, epoch)
+            '''
+            求每个类的平均预测概率
+            例子：
+            Softmax probabilities:
+                tensor([[9.9995e-01, 4.5398e-05, 2.0611e-09, 2.2603e-07],
+                        [2.0611e-09, 9.9999e-01, 9.1188e-07, 1.6702e-10],
+                        [2.2603e-07, 2.0611e-09, 9.9995e-01, 4.5398e-05]])
+            Average probabilities across samples:
+                tensor([0.3333, 0.3333, 0.3333, 0.0000])
+            第四个类的平均预测概率是0.0000，表示模型对这个类的预测概率很低。
+            '''
             avg_probs = (student_out / 0.1).softmax(dim=1).mean(dim=0)
+
+            '''
+            通过最小化负熵（即最大化熵），鼓励模型在旧类别和新类别之间分配更均匀的注意力，从而减少类别间的预测偏差。
+            '''
 
             # 1. inter old and new
             avg_probs_old_in = avg_probs[:args.num_seen_classes]
             avg_probs_new_in = avg_probs[args.num_seen_classes:]
 
+            # torch.sum(avg_probs_old_in) 将所有旧类别的预测概率加总，得到模型对旧类别的整体关注程度。avg_probs_new_marginal同理。
             avg_probs_old_marginal, avg_probs_new_marginal = torch.sum(avg_probs_old_in), torch.sum(avg_probs_new_in)
             me_max_loss_old_new =  avg_probs_old_marginal * torch.log(avg_probs_old_marginal) + avg_probs_new_marginal * torch.log(avg_probs_new_marginal) + math.log(2)
 
