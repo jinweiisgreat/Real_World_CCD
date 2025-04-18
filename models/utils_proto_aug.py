@@ -59,7 +59,7 @@ class ProtoAugManager:
 
         return proto_aug_loss
 
-
+    # 在每个在线阶段(Online Session)中，使用上一阶段保存的原型和难度分布进行采样
     def compute_proto_aug_hardness_aware_loss(self, model):
         prototypes = F.normalize(self.prototypes, dim=-1, p=2).to(self.device)
 
