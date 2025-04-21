@@ -349,6 +349,7 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
     args.best_test_acc_seen_list.append(best_test_acc_seen)
     args.best_test_acc_unseen_list.append(best_test_acc_unseen)
 
+# 原版
 '''
 def test_online(model, test_loader, epoch, save_name, args):
     # ============================ 打印测试集信息 ============================
@@ -965,31 +966,27 @@ def test_online(model, test_loader, epoch, save_name, args):
 
     return all_acc, old_acc, new_acc, all_acc_soft, seen_acc, unseen_acc
 '''
+
 DATASET_CLASS_NAMES = {
     'clear10': [
-        'baseball',  # 0
-        'bus',       # 1
-        'camera',    # 2
-        'cosplay',   # 3
-        'dress',     # 4
-        'hockey',    # 5
-        'laptop',    # 6
-        'racing',    # 7
-        'soccer',    # 8
-        'sweater'    # 9
+        'baseball', 'bus', 'camera', 'cosplay', 'dress', 'hockey', 'laptop', 'racing', 'soccer', 'sweater'    # 9
     ],
     'cifar10': [
-        'airplane',    # 0
-        'automobile',  # 1
-        'bird',        # 2
-        'cat',         # 3
-        'deer',        # 4
-        'dog',         # 5
-        'frog',        # 6
-        'horse',       # 7
-        'ship',        # 8
-        'truck'        # 9
-    ]}
+        'airplane', 'automobile', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck'
+    ],
+    'cifar100': [
+        'apple', 'aquarium_fish', 'baby', 'bear', 'beaver', 'bed', 'bee', 'beetle', 'bicycle', 'bottle',
+        'bowl', 'boy', 'bridge', 'bus', 'butterfly', 'cameleon', 'can', 'castle', 'caterpillar', 'cattle',
+        'chair', 'chimpanzee', 'clock', 'cloud', 'cockroach', 'couch', 'crab', 'crocodile', 'cup', 'dinosaur',
+        'dolphin', 'elephant', 'flatfish', 'forest', 'fox', 'girl', 'hamster', 'house', 'kangaroo', 'keyboard',
+        'lamp', 'lawn_mower', 'leopard', 'lion', 'lizard', 'lobster', 'man', 'maple_tree', 'motorcycle', 'mountain',
+        'mouse', 'mushroom', 'oak_tree', 'orange', 'orchid', 'otter', 'palm_tree', 'pear', 'pickup_truck', 'pine_tree',
+        'plain', 'plate', 'poppy', 'porcupine', 'possum', 'rabbit', 'raccoon', 'ray', 'road', 'rocket',
+        'rose', 'sea', 'seal', 'shark', 'shrew', 'skunk', 'skyscraper', 'snail', 'snake', 'spider',
+        'squirrel', 'streetcar', 'sunflower', 'sweet_pepper', 'table', 'tank', 'telephone', 'television', 'tiger',
+        'tractor', 'train', 'trout', 'tulip', 'turtle', 'wardrobe', 'whale', 'willow_tree', 'wolf', 'woman', 'worm'
+]
+}
 
 
 def test_online(model, test_loader, epoch, save_name, args):
