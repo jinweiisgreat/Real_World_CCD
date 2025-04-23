@@ -1093,9 +1093,13 @@ def test_online(model, test_loader, epoch, save_name, args):
             plt.figure(figsize=(12, 10))
 
             # 使用Seaborn绘制更美观的热力图
-            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                        xticklabels=[f"{i}:{class_names[i]}" if i < len(class_names) else i for i in all_classes],
-                        yticklabels=[f"{i}:{class_names[i]}" if i < len(class_names) else i for i in all_classes])
+            # sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+            #             xticklabels=[f"{i}:{class_names[i]}" if i < len(class_names) else i for i in all_classes],
+            #             yticklabels=[f"{i}:{class_names[i]}" if i < len(class_names) else i for i in all_classes])
+
+            sns.heatmap(cm, fmt='d', cmap='Blues',
+                        xticklabels=all_classes,
+                        yticklabels=all_classes)
 
             plt.xlabel(' Prediction')
             plt.ylabel(' Ground Truth')
