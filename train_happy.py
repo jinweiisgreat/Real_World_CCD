@@ -350,25 +350,8 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
     args.best_test_acc_unseen_list.append(best_test_acc_unseen)
 
 # 手动计算匈牙利匹配
-'''
+"""
 def test_online(model, test_loader, epoch, save_name, args):
-    # ============================ 打印测试集信息 ============================
-
-    def print_testset_info(test_loader, class_names=None, prefix=""):
-        all_labels = []
-        for _, labels, _ in test_loader:
-            all_labels.extend(labels.cpu().numpy())
-
-        counter = Counter(all_labels)
-        print(f"\n{prefix}测试集中类别分布:")
-        for cls_id in sorted(counter.keys()):
-            cls_name = class_names[cls_id] if class_names and cls_id in class_names else str(cls_id)
-            print(f"  类别 {cls_id} ({cls_name}): {counter[cls_id]} 个样本")
-        print(f"  总测试样本: {len(all_labels)}")
-
-    print_testset_info(test_loader, class_names=getattr(args, 'class_names', None), prefix="Online")
-    # ============================ 打印测试集信息 完毕============================
-
     model.eval()
 
     preds, targets = [], []
@@ -402,726 +385,181 @@ def test_online(model, test_loader, epoch, save_name, args):
                                                              T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
                                                              args=args)
 
-    # # --------- 改进的手动计算方法 ---------
-    # from scipy.optimize import linear_sum_assignment
-    #
-    # # 将数据分为已见和未见类别
-    # seen_mask = mask_soft.astype(bool)
-    # unseen_mask = ~seen_mask
-    #
-    # seen_preds = preds[seen_mask]
-    # seen_targets = targets[seen_mask]
-    # unseen_preds = preds[unseen_mask]
-    # unseen_targets = targets[unseen_mask]
-    #
-    # # 为已见类别构建混淆矩阵和映射
-    # seen_classes_pred = np.unique(seen_preds)
-    # seen_classes_target = np.unique(seen_targets)
-    # seen_classes = np.union1d(seen_classes_pred, seen_classes_target)
-    #
-    # seen_class_to_idx = {c: i for i, c in enumerate(seen_classes)}
-    # seen_w = np.zeros((len(seen_classes), len(seen_classes)), dtype=int)
-    #
-    # for i in range(len(seen_preds)):
-    #     pred_idx = seen_class_to_idx[seen_preds[i]]
-    #     target_idx = seen_class_to_idx[seen_targets[i]]
-    #     seen_w[pred_idx, target_idx] += 1
-    #
-    # seen_row_ind, seen_col_ind = linear_sum_assignment(seen_w.max() - seen_w)
-    # seen_map = {seen_classes[i]: seen_classes[j] for i, j in zip(seen_row_ind, seen_col_ind)}
-    #
-    # # 如果有未见类别，为它们构建单独的映射
-    # unseen_map = {}
-    # if len(unseen_preds) > 0:
-    #     unseen_classes_pred = np.unique(unseen_preds)
-    #     unseen_classes_target = np.unique(unseen_targets)
-    #
-    #     # 为未见类别创建频率矩阵
-    #     unseen_w = np.zeros((len(unseen_classes_pred), len(unseen_classes_target)), dtype=int)
-    #     unseen_pred_to_idx = {c: i for i, c in enumerate(unseen_classes_pred)}
-    #     unseen_target_to_idx = {c: i for i, c in enumerate(unseen_classes_target)}
-    #
-    #     for i in range(len(unseen_preds)):
-    #         pred_idx = unseen_pred_to_idx[unseen_preds[i]]
-    #         target_idx = unseen_target_to_idx[unseen_targets[i]]
-    #         unseen_w[pred_idx, target_idx] += 1
-    #
-    #     # 应用匈牙利算法找到最佳映射
-    #     if unseen_w.size > 0:
-    #         unseen_row_ind, unseen_col_ind = linear_sum_assignment(unseen_w.max() - unseen_w)
-    #         for i, j in zip(unseen_row_ind, unseen_col_ind):
-    #             pred_class = unseen_classes_pred[i]
-    #             target_class = unseen_classes_target[j]
-    #             # 只有当映射有足够支持时才添加
-    #             if unseen_w[i, j] > 0:
-    #                 unseen_map[pred_class] = target_class
-    #
-    # # 合并映射
-    # class_map = {**seen_map, **unseen_map}
-    #
-    # # 应用映射到整个预测集
-    # remapped_preds = np.array([class_map.get(p, p) for p in preds])
-    #
-    # # 计算准确率
-    # all_correct = np.sum(remapped_preds == targets)
-    # all_total = len(targets)
-    # all_Acc = all_correct / all_total
-    #
-    # # 计算旧类(mask_hard)准确率
-    # old_mask = mask_hard.astype(bool)
-    # old_preds = remapped_preds[old_mask]
-    # old_targets = targets[old_mask]
-    # old_correct = np.sum(old_preds == old_targets)
-    # old_total = len(old_targets)
-    # old_Acc = old_correct / max(old_total, 1)
-    #
-    # # 计算新类准确率
-    # new_mask = ~old_mask
-    # new_preds = remapped_preds[new_mask]
-    # new_targets = targets[new_mask]
-    # new_correct = np.sum(new_preds == new_targets)
-    # new_total = len(new_targets)
-    # new_Acc = new_correct / max(new_total, 1)
-    #
-    # # 计算已见类准确率
-    # seen_preds_remapped = remapped_preds[seen_mask]
-    # seen_correct = np.sum(seen_preds_remapped == seen_targets)
-    # seen_total = len(seen_targets)
-    # seen_Acc = seen_correct / max(seen_total, 1)
-    #
-    # # 计算未见类准确率
-    # unseen_preds_remapped = remapped_preds[unseen_mask]
-    # unseen_correct = np.sum(unseen_preds_remapped == unseen_targets)
-    # unseen_total = len(unseen_targets)
-    # unseen_Acc = unseen_correct / max(unseen_total, 1)
-    #
-    # # 记录和输出结果
-    # args.logger.info(f"我的计算结果:")
-    # args.logger.info(f"All: {all_Acc:.4f}")
-    # args.logger.info(f"Old: {old_Acc:.4f}")
-    # args.logger.info(f"New: {new_Acc:.4f}")
-    # args.logger.info(f"Seen: {seen_Acc:.4f}")
-    # args.logger.info(f"Unseen: {unseen_Acc:.4f}")
-    #
-    # # 与官方结果比较
-    # args.logger.info(f"官方计算结果:")
-    # args.logger.info(f"All: {all_acc:.4f}")
-    # args.logger.info(f"Old: {old_acc:.4f}")
-    # args.logger.info(f"New: {new_acc:.4f}")
-    # args.logger.info(f"Seen: {seen_acc:.4f}")
-    # args.logger.info(f"Unseen: {unseen_acc:.4f}")
+    # 手动计算各个准确率 - 使用匈牙利算法进行标签重映射
+    from scipy.optimize import linear_sum_assignment
+
+    # 构建混淆矩阵
+    D = max(preds.max(), targets.max()) + 1
+    w = np.zeros((D, D), dtype=int)
+    for i in range(preds.size):
+        w[preds[i], targets[i]] += 1
+
+    # 应用匈牙利算法找到最佳标签映射
+    row_ind, col_ind = linear_sum_assignment(w.max() - w)
+    ind_map = {j: i for i, j in zip(col_ind, row_ind)}
+
+    # 重映射预测结果
+    remapped_preds = np.array([ind_map.get(p, p) for p in preds])
+
+    # 整体准确率 (使用重映射后的预测)
+    all_correct = np.sum(remapped_preds == targets)
+    all_total = len(targets)
+    all_Acc = all_correct / all_total
+    all_Acc_soft = all_Acc  # 这两个是相同的
+    print("all_Acc (remapped):", all_Acc)
+
+    # 旧类别准确率 (使用mask_hard和重映射后的预测)
+    old_preds = remapped_preds[mask_hard.astype(bool)]
+    old_targets = targets[mask_hard.astype(bool)]
+    old_correct = np.sum(old_preds == old_targets)
+    old_total = len(old_targets)
+    old_Acc = old_correct / max(old_total, 1)
+    print("old_Acc (remapped):", old_Acc)
+
+    # 新类别准确率 (使用mask_hard的反面和重映射后的预测)
+    new_preds = remapped_preds[~mask_hard.astype(bool)]
+    new_targets = targets[~mask_hard.astype(bool)]
+    new_correct = np.sum(new_preds == new_targets)
+    new_total = len(new_targets)
+    new_Acc = new_correct / max(new_total, 1)
+    print("new_Acc (remapped):", new_Acc)
+
+    # 已见类别准确率 (使用mask_soft和重映射后的预测)
+    seen_preds = remapped_preds[mask_soft.astype(bool)]
+    seen_targets = targets[mask_soft.astype(bool)]
+    seen_correct = np.sum(seen_preds == seen_targets)
+    seen_total = len(seen_targets)
+    seen_Acc = seen_correct / max(seen_total, 1)
+    print("seen_Acc (remapped):", seen_Acc)
+
+    # 未见类别准确率 (使用mask_soft的反面和重映射后的预测)
+    unseen_preds = remapped_preds[~mask_soft.astype(bool)]
+    unseen_targets = targets[~mask_soft.astype(bool)]
+    unseen_correct = np.sum(unseen_preds == unseen_targets)
+    unseen_total = len(unseen_targets)
+    unseen_Acc = unseen_correct / max(unseen_total, 1)
+    print("unseen_Acc (remapped):", unseen_Acc)
+
+    # 输出未见类别的详细信息
+    args.logger.info(
+        f"Unseen correct (remapped): {unseen_correct}/{unseen_total} = {unseen_correct / max(unseen_total, 1):.4f}")
+
+    # 对比原始计算和重映射后的计算结果
+    args.logger.info(f"Comparing with log_accs_from_preds results:")
+    args.logger.info(f"All: {all_Acc:.4f} vs {all_acc:.4f}")
+    args.logger.info(f"Old: {old_Acc:.4f} vs {old_acc:.4f}")
+    args.logger.info(f"New: {new_Acc:.4f} vs {new_acc:.4f}")
+    args.logger.info(f"Seen: {seen_Acc:.4f} vs {seen_acc:.4f}")
+    args.logger.info(f"Unseen: {unseen_Acc:.4f} vs {unseen_acc:.4f}")
 
     return all_acc, old_acc, new_acc, all_acc_soft, seen_acc, unseen_acc
-'''
+"""
 
-# 在线测试函数，支持显示测试图片和标签，并特别展示识别错误的前5个样本
-'''
+
 def test_online(model, test_loader, epoch, save_name, args):
     """
-    在线测试函数，支持显示测试图片和标签，并特别展示识别错误的前5个样本
+    Online testing function that only generates a confusion matrix.
 
     Args:
-        model: 待评估的模型
-        test_loader: 测试数据加载器
-        epoch: 当前训练轮次
-        save_name: 保存名称
-        args: 参数对象，需包含logger
+        model: Model to evaluate
+        test_loader: Test data loader
+        epoch: Current training epoch
+        save_name: Name for saving results
+        args: Arguments object with logger
 
     Returns:
-        各类评估指标
+        Evaluation metrics
     """
-    import matplotlib.pyplot as plt
     import numpy as np
     import os
-    from collections import Counter
     import torch
     from tqdm import tqdm
+    from project_utils.cluster_and_log_utils import log_accs_from_preds
 
-    # 在函数内部直接定义class_names列表
-    class_names = [
-        'baseball',  # 0
-        'bus',  # 1
-        'camera',  # 2
-        'cosplay',  # 3
-        'dress',  # 4
-        'hockey',  # 5
-        'laptop',  # 6
-        'racing',  # 7
-        'soccer',  # 8
-        'sweater'  # 9
-    ]
+    # ============================ Model evaluation ============================
+    model.eval()
 
-    # 将class_names添加到args中以便其他地方使用
-    args.class_names = class_names
+    preds, targets = [], []
+    mask_hard = np.array([])
+    mask_soft = np.array([])
 
-    # ============================ 打印测试集信息 ============================
-    def print_testset_info(test_loader, class_names, prefix=""):
-        all_labels = []
-        for batch in test_loader:
-            if len(batch) >= 2:  # 兼容不同的数据加载器格式
-                labels = batch[1]
-                all_labels.extend(labels.cpu().numpy())
+    for batch_idx, batch in enumerate(tqdm(test_loader, desc="Evaluating")):
+        # Handle different data loader formats
+        if len(batch) == 2:
+            images, label = batch
+        elif len(batch) >= 3:
+            images, label, _ = batch[:3]
 
-        counter = Counter(all_labels)
-        args.logger.info(f"\n{prefix}测试集中类别分布:")
-        for cls_id in sorted(counter.keys()):
-            cls_name = class_names[cls_id] if cls_id < len(class_names) else str(cls_id)
-            args.logger.info(f"  类别 {cls_id} ({cls_name}): {counter[cls_id]} 个样本")
-        args.logger.info(f"  总测试样本: {len(all_labels)}")
-        return counter
+        images = images.cuda(non_blocking=True)
 
-    class_counter = print_testset_info(test_loader, class_names, prefix="Online")
+        with torch.no_grad():
+            # Get model predictions
+            try:
+                _, logits = model(images)
+            except:
+                logits = model(images)
 
-    # ============================ 查看前5张测试图片 ==========================
-    args.logger.info("\n显示测试集前5张图片:")
+            batch_preds = logits.argmax(1).cpu().numpy()
+            preds.append(batch_preds)
+            targets.append(label.cpu().numpy())
 
-    # 创建一个整合所有图片的大图
-    plt.figure(figsize=(15, 5))
+            # Create masks for different evaluation metrics
+            mask_hard = np.append(mask_hard, np.array([True if x.item() in range(len(args.train_classes))
+                                                       else False for x in label]))
+            mask_soft = np.append(mask_soft, np.array([True if x.item() in range(args.num_seen_classes)
+                                                       else False for x in label]))
 
-    # 获取前5张图片和标签
-    images_to_show = []
-    labels_to_show = []
-    count = 0
+    preds = np.concatenate(preds)
+    targets = np.concatenate(targets)
 
-    # 从测试集中提取前5张图片
-    for batch in test_loader:
-        if len(batch) >= 2:  # 兼容不同的数据加载器格式
-            images = batch[0]
-            labels = batch[1]
-
-            batch_size = min(5 - count, len(images))
-            for i in range(batch_size):
-                count += 1
-                img = images[i].cpu()
-                label = labels[i].item()
-
-                # 保存图片和标签
-                images_to_show.append(img)
-                labels_to_show.append(label)
-
-                # 显示图片信息
-                cls_name = class_names[label] if label < len(class_names) else f"未知类别({label})"
-                args.logger.info(f"图片 {count}: 标签ID = {label}, 类别名称 = {cls_name}")
-
-                # 在大图中添加这张图片
-                plt.subplot(1, 5, count)
-
-                # 处理图像以便显示
-                if hasattr(img, 'permute'):  # 处理PyTorch张量
-                    # 将CHW转为HWC格式并转换为numpy数组
-                    img_np = img.permute(1, 2, 0).numpy()
-
-                    # 标准化图像到[0,1]范围
-                    if img_np.max() > 1.0 or img_np.min() < 0.0:
-                        img_np = (img_np - img_np.min()) / (img_np.max() - img_np.min() + 1e-5)
-                else:
-                    img_np = img
-
-                plt.imshow(img_np)
-                plt.title(f"{cls_name} (ID:{label})")
-                plt.axis('off')
-
-            if count >= 5:
-                break
-
-    # 保存合并后的图片
+    # -----------------------
+    # Generate confusion matrix
+    # -----------------------
     if hasattr(args, 'log_dir'):
-        sample_img_path = os.path.join(args.log_dir, f'test_samples_epoch_{epoch}.png')
-        plt.tight_layout()
-        plt.savefig(sample_img_path)
-        plt.close()
-        args.logger.info(f"测试样本图片已保存到: {sample_img_path}")
-
-    # ============================ 模型评估 ============================
-    model.eval()
-
-    # 用于收集错误预测的样本
-    wrong_samples = []
-
-    preds, targets = [], []
-    mask_hard = np.array([])
-    mask_soft = np.array([])
-
-    # 记录前5个预测结果
-    pred_first_5 = []
-    true_first_5 = []
-    count = 0
-
-    for batch_idx, batch in enumerate(tqdm(test_loader, desc="评估测试集")):
-        # 兼容不同的数据加载器格式
-        if len(batch) == 2:
-            images, label = batch
-        elif len(batch) >= 3:
-            images, label, _ = batch[:3]
-
-        # 将图像移至GPU
-        images = images.cuda(non_blocking=True)
-
-        with torch.no_grad():
-            # 获取模型预测
-            try:
-                _, logits = model(images)
-            except:
-                logits = model(images)
-
-            batch_preds = logits.argmax(1).cpu()
-
-            # 找出预测错误的样本
-            for i in range(len(batch_preds)):
-                if batch_preds[i].item() != label[i].item():
-                    # 存储错误样本信息
-                    wrong_samples.append({
-                        'image': images[i].cpu(),
-                        'pred': batch_preds[i].item(),
-                        'true': label[i].item()
-                    })
-
-            preds.append(batch_preds.numpy())
-            targets.append(label.cpu().numpy())
-
-            # 记录前5个样本的预测结果
-            if count < 5:
-                items_to_add = min(5 - count, len(batch_preds))
-                pred_first_5.extend(batch_preds[:items_to_add].tolist())
-                true_first_5.extend(label.cpu().numpy()[:items_to_add].tolist())
-                count += items_to_add
-
-            # args.train_classes 原始训练时定义的类别
-            mask_hard = np.append(mask_hard, np.array([True if x.item() in range(len(args.train_classes))
-                                                       else False for x in label]))
-            # args.num_seen_classes 当前已见类别范围
-            mask_soft = np.append(mask_soft, np.array([True if x.item() in range(args.num_seen_classes)
-                                                       else False for x in label]))
-
-    preds = np.concatenate(preds)
-    targets = np.concatenate(targets)
-
-    # 输出前5个样本的预测结果
-    args.logger.info("\n前5个测试样本的预测结果:")
-    for i, (pred, true) in enumerate(zip(pred_first_5, true_first_5)):
-        pred_class = class_names[pred] if pred < len(class_names) else f"未知({pred})"
-        true_class = class_names[true] if true < len(class_names) else f"未知({true})"
-        correct = "✓" if pred == true else "✗"
-        args.logger.info(f"样本 {i + 1}: 预测 = {pred} ({pred_class}), 真实 = {true} ({true_class}) {correct}")
-
-    # ============================== 显示错误预测的前5个样本 ==============================
-    args.logger.info("\n显示错误预测的前5个样本:")
-
-    # 只取前5个错误样本
-    wrong_samples = wrong_samples[:5]
-
-    if len(wrong_samples) > 0:
-        # 创建一个展示错误样本的大图
-        plt.figure(figsize=(15, 5))
-
-        for i, sample in enumerate(wrong_samples):
-            img = sample['image']
-            pred_id = sample['pred']
-            true_id = sample['true']
-
-            pred_class = class_names[pred_id] if pred_id < len(class_names) else f"未知({pred_id})"
-            true_class = class_names[true_id] if true_id < len(class_names) else f"未知({true_id})"
-
-            # 在日志中显示错误样本信息
-            args.logger.info(f"错误样本 {i + 1}: 预测 = {pred_id} ({pred_class}), 真实 = {true_id} ({true_class})")
-
-            # 在大图中添加这张图片
-            plt.subplot(1, len(wrong_samples), i + 1)
-
-            # 处理图像以便显示
-            if hasattr(img, 'permute'):  # 处理PyTorch张量
-                # 将CHW转为HWC格式并转换为numpy数组
-                img_np = img.permute(1, 2, 0).numpy()
-
-                # 标准化图像到[0,1]范围
-                if img_np.max() > 1.0 or img_np.min() < 0.0:
-                    img_np = (img_np - img_np.min()) / (img_np.max() - img_np.min() + 1e-5)
-            else:
-                img_np = img
-
-            plt.imshow(img_np)
-            plt.title(f"pre:{pred_class}\n cor:{true_class}", color='red')
-            plt.axis('off')
-
-        # 保存错误样本图片
-        if hasattr(args, 'log_dir'):
-            wrong_img_path = os.path.join(args.log_dir, f'wrong_samples_epoch_{epoch}.png')
-            plt.tight_layout()
-            plt.savefig(wrong_img_path)
-            plt.close()
-            args.logger.info(f"错误样本图片已保存到: {wrong_img_path}")
-    else:
-        args.logger.info("没有找到错误预测的样本!")
-
-    # -----------------------
-    # EVALUATE
-    # -----------------------
-    all_acc, old_acc, new_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_hard,
-                                                    T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
-                                                    args=args)
-
-    all_acc_soft, seen_acc, unseen_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_soft,
-                                                             T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
-                                                             args=args)
-
-    # 打印总结信息
-    args.logger.info(f"\n测试结果总结 (Epoch {epoch}):")
-    args.logger.info(f"Hard分类指标: 全部={all_acc:.4f}, 旧类={old_acc:.4f}, 新类={new_acc:.4f}")
-    args.logger.info(f"Soft分类指标: 全部={all_acc_soft:.4f}, 已见={seen_acc:.4f}, 未见={unseen_acc:.4f}")
-    args.logger.info(f"错误率: {(1 - all_acc) * 100:.2f}% (找到{len(wrong_samples)}个错误样本展示)")
-
-    return all_acc, old_acc, new_acc, all_acc_soft, seen_acc, unseen_acc
-'''
-
-DATASET_CLASS_NAMES = {
-    'clear10': [
-        'baseball', 'bus', 'camera', 'cosplay', 'dress', 'hockey', 'laptop', 'racing', 'soccer', 'sweater'    # 9
-    ],
-    'cifar10': [
-        'airplane', 'automobile', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck'
-    ],
-    'cifar100': [
-        'apple', 'aquarium_fish', 'baby', 'bear', 'beaver', 'bed', 'bee', 'beetle', 'bicycle', 'bottle',
-        'bowl', 'boy', 'bridge', 'bus', 'butterfly', 'cameleon', 'can', 'castle', 'caterpillar', 'cattle',
-        'chair', 'chimpanzee', 'clock', 'cloud', 'cockroach', 'couch', 'crab', 'crocodile', 'cup', 'dinosaur',
-        'dolphin', 'elephant', 'flatfish', 'forest', 'fox', 'girl', 'hamster', 'house', 'kangaroo', 'keyboard',
-        'lamp', 'lawn_mower', 'leopard', 'lion', 'lizard', 'lobster', 'man', 'maple_tree', 'motorcycle', 'mountain',
-        'mouse', 'mushroom', 'oak_tree', 'orange', 'orchid', 'otter', 'palm_tree', 'pear', 'pickup_truck', 'pine_tree',
-        'plain', 'plate', 'poppy', 'porcupine', 'possum', 'rabbit', 'raccoon', 'ray', 'road', 'rocket',
-        'rose', 'sea', 'seal', 'shark', 'shrew', 'skunk', 'skyscraper', 'snail', 'snake', 'spider',
-        'squirrel', 'streetcar', 'sunflower', 'sweet_pepper', 'table', 'tank', 'telephone', 'television', 'tiger',
-        'tractor', 'train', 'trout', 'tulip', 'turtle', 'wardrobe', 'whale', 'willow_tree', 'wolf', 'woman', 'worm'
-]
-}
-
-
-def test_online(model, test_loader, epoch, save_name, args):
-    """
-    在线测试函数，在session结束时显示测试图片和识别错误的样本
-    支持多种数据集的类别名称
-
-    Args:
-        model: 待评估的模型
-        test_loader: 测试数据加载器
-        epoch: 当前训练轮次
-        save_name: 保存名称
-        args: 参数对象，需包含logger
-
-    Returns:
-        各类评估指标
-    """
-    import matplotlib.pyplot as plt
-    import numpy as np
-    import os
-    from collections import Counter
-    import torch
-    from tqdm import tqdm
-
-    # 获取当前数据集的类别名称
-    if hasattr(args, 'dataset_name') and args.dataset_name in DATASET_CLASS_NAMES:
-        class_names = DATASET_CLASS_NAMES[args.dataset_name]
-    elif hasattr(args, 'class_names'):
-        # 如果args中已经有class_names，则使用它
-        class_names = args.class_names
-    else:
-        # 默认使用数字作为类别名称
-        class_names = [f"类别{i}" for i in range(100)]
-        args.logger.info("未找到数据集类别名称，使用默认编号")
-
-    # 将class_names添加到args中以便其他地方使用
-    args.class_names = class_names
-
-    # 判断是否是session结束以及当前session
-    is_session_end = False
-    current_session = None
-
-    # 修复session计算逻辑
-    # 首先检查是否传入了当前session信息
-    if hasattr(args, 'current_session'):
-        # 如果直接传入了当前session编号，则使用它
-        current_session = args.current_session
-    else:
-        # 尝试从其他参数推断当前session
-        if hasattr(args, 'num_seen_classes') and hasattr(args, 'num_labeled_classes') and hasattr(args,
-                                                                                                  'num_novel_class_per_session'):
-            # 基于已见类别数量计算当前session
-            if args.num_seen_classes > args.num_labeled_classes:
-                # (已见类别 - 初始类别) / 每个session的新类别数 = 已完成的session数
-                completed_sessions = (
-                                                 args.num_seen_classes - args.num_labeled_classes) // args.num_novel_class_per_session
-                current_session = completed_sessions + 1  # 当前正在进行的session
-            else:
-                current_session = 1  # 第一个session
-
-    # 如果仍然无法确定session，使用默认方法
-    if current_session is None:
-        # 默认从1开始
-        current_session = 1
-        args.logger.info("无法确定当前session编号，使用默认值1")
-
-    # 判断是否为session结束
-    if hasattr(args, 'epochs_online_per_session'):
-        # 如果当前epoch是session的最后一个epoch
-        if (epoch + 1) % args.epochs_online_per_session == 0 or epoch == args.epochs_online_per_session - 1:
-            is_session_end = True
-            args.logger.info(f"当前为Session {current_session}的最后一个epoch")
-
-    # ============================ 打印测试集信息 ============================
-    def print_testset_info(test_loader, class_names, prefix=""):
-        all_labels = []
-        for batch in test_loader:
-            if len(batch) >= 2:  # 兼容不同的数据加载器格式
-                labels = batch[1]
-                all_labels.extend(labels.cpu().numpy())
-
-        counter = Counter(all_labels)
-        args.logger.info(f"\n{prefix}测试集中类别分布:")
-        for cls_id in sorted(counter.keys()):
-            cls_name = class_names[cls_id] if cls_id < len(class_names) else str(cls_id)
-            args.logger.info(f"  类别 {cls_id} ({cls_name}): {counter[cls_id]} 个样本")
-        args.logger.info(f"  总测试样本: {len(all_labels)}")
-        return counter
-
-    class_counter = print_testset_info(test_loader, class_names, prefix="Online")
-
-    # ============================ 模型评估 ============================
-    model.eval()
-
-    # 用于收集所有样本和错误预测的样本
-    all_samples = []
-    wrong_samples = []
-
-    preds, targets = [], []
-    mask_hard = np.array([])
-    mask_soft = np.array([])
-
-    for batch_idx, batch in enumerate(tqdm(test_loader, desc="评估测试集")):
-        # 兼容不同的数据加载器格式
-        if len(batch) == 2:
-            images, label = batch
-        elif len(batch) >= 3:
-            images, label, _ = batch[:3]
-
-        # 将图像移至GPU
-        images = images.cuda(non_blocking=True)
-
-        with torch.no_grad():
-            # 获取模型预测
-            try:
-                _, logits = model(images)
-            except:
-                logits = model(images)
-
-            batch_preds = logits.argmax(1).cpu()
-
-            # 收集所有样本信息（如果是session结束）
-            if is_session_end:
-                for i in range(len(batch_preds)):
-                    sample_info = {
-                        'image': images[i].cpu(),
-                        'pred': batch_preds[i].item(),
-                        'true': label[i].item(),
-                        'is_correct': batch_preds[i].item() == label[i].item()
-                    }
-
-                    # 添加到所有样本列表
-                    all_samples.append(sample_info)
-
-                    # 如果预测错误，添加到错误样本列表
-                    if not sample_info['is_correct']:
-                        wrong_samples.append(sample_info)
-
-            preds.append(batch_preds.numpy())
-            targets.append(label.cpu().numpy())
-
-            # args.train_classes 原始训练时定义的类别
-            mask_hard = np.append(mask_hard, np.array([True if x.item() in range(len(args.train_classes))
-                                                       else False for x in label]))
-            # args.num_seen_classes 当前已见类别范围
-            mask_soft = np.append(mask_soft, np.array([True if x.item() in range(args.num_seen_classes)
-                                                       else False for x in label]))
-
-    preds = np.concatenate(preds)
-    targets = np.concatenate(targets)
-
-    # ============================== 如果是session结束，显示样本和错误 ==============================
-    if is_session_end and hasattr(args, 'log_dir'):
-        # 记录当前session编号到文件名
-        session_str = f"session_{current_session}"
-
-        # 1. 显示前5个测试样本
-        args.logger.info(f"\n显示{session_str}的前5个测试样本:")
-
-        # 只取前5个样本
-        samples_to_show = all_samples[:5]
-
-        if len(samples_to_show) > 0:
-            # 创建一个展示样本的大图
-            plt.figure(figsize=(15, 5))
-
-            for i, sample in enumerate(samples_to_show):
-                img = sample['image']
-                pred_id = sample['pred']
-                true_id = sample['true']
-
-                pred_class = class_names[pred_id] if pred_id < len(class_names) else f"未知({pred_id})"
-                true_class = class_names[true_id] if true_id < len(class_names) else f"未知({true_id})"
-
-                # 在日志中显示样本信息
-                status = "✓" if sample['is_correct'] else "✗"
-                args.logger.info(f"样本 {i + 1}: 预测={pred_id} ({pred_class}), 真实={true_id} ({true_class}) {status}")
-
-                # 在大图中添加这张图片
-                plt.subplot(1, len(samples_to_show), i + 1)
-
-                # 处理图像以便显示
-                if hasattr(img, 'permute'):  # 处理PyTorch张量
-                    # 将CHW转为HWC格式并转换为numpy数组
-                    img_np = img.permute(1, 2, 0).numpy()
-
-                    # 标准化图像到[0,1]范围
-                    if img_np.max() > 1.0 or img_np.min() < 0.0:
-                        img_np = (img_np - img_np.min()) / (img_np.max() - img_np.min() + 1e-5)
-                else:
-                    img_np = img
-
-                plt.imshow(img_np)
-                plt.title(f"{true_class}\n pre:{pred_class}",
-                          color='green' if sample['is_correct'] else 'red')
-                plt.axis('off')
-
-            # 保存样本图片
-            sample_img_path = os.path.join(args.log_dir, f'test_samples_{session_str}.png')
-            plt.tight_layout()
-            plt.savefig(sample_img_path)
-            plt.close()
-            args.logger.info(f"测试样本图片已保存到: {sample_img_path}")
-
-        # 2. 显示所有错误预测的样本信息
-        args.logger.info(f"\n显示{session_str}的所有错误预测样本 (总计 {len(wrong_samples)} 个):")
-
-        # 创建一个表格记录所有错误样本
-        wrong_info_text = "索引,预测类别ID,预测类别名,真实类别ID,真实类别名\n"
-        for i, sample in enumerate(wrong_samples):
-            pred_id = sample['pred']
-            true_id = sample['true']
-
-            pred_class = class_names[pred_id] if pred_id < len(class_names) else f"未知({pred_id})"
-            true_class = class_names[true_id] if true_id < len(class_names) else f"未知({true_id})"
-
-            wrong_info_text += f"{i + 1},{pred_id},{pred_class},{true_id},{true_class}\n"
-
-            # 在日志中显示前20个错误样本
-            if i < 20:
-                args.logger.info(f"错误样本 {i + 1}: 预测={pred_id} ({pred_class}), 真实={true_id} ({true_class})")
-
-        # 保存错误信息到文本文件
-        wrong_info_path = os.path.join(args.log_dir, f'wrong_predictions_{session_str}.csv')
-        with open(wrong_info_path, 'w') as f:
-            f.write(wrong_info_text)
-        args.logger.info(f"所有错误预测信息已保存到: {wrong_info_path}")
-
-        # 3. 显示错误预测的样本图片
-        if len(wrong_samples) > 0:
-            # 最多显示10个错误样本
-            wrong_to_show = wrong_samples[:min(10, len(wrong_samples))]
-
-            # 计算行数和列数
-            n_cols = min(5, len(wrong_to_show))
-            n_rows = (len(wrong_to_show) + n_cols - 1) // n_cols
-
-            # 创建一个展示错误样本的大图
-            plt.figure(figsize=(3 * n_cols, 3 * n_rows))
-
-            for i, sample in enumerate(wrong_to_show):
-                img = sample['image']
-                pred_id = sample['pred']
-                true_id = sample['true']
-
-                pred_class = class_names[pred_id] if pred_id < len(class_names) else f"未知({pred_id})"
-                true_class = class_names[true_id] if true_id < len(class_names) else f"未知({true_id})"
-
-                # 在大图中添加这张图片
-                plt.subplot(n_rows, n_cols, i + 1)
-
-                # 处理图像以便显示
-                if hasattr(img, 'permute'):  # 处理PyTorch张量
-                    # 将CHW转为HWC格式并转换为numpy数组
-                    img_np = img.permute(1, 2, 0).numpy()
-
-                    # 标准化图像到[0,1]范围
-                    if img_np.max() > 1.0 or img_np.min() < 0.0:
-                        img_np = (img_np - img_np.min()) / (img_np.max() - img_np.min() + 1e-5)
-                else:
-                    img_np = img
-
-                plt.imshow(img_np)
-                plt.title(f"GT:{true_class}\n Pre:{pred_class}", color='red', fontsize=10)
-                plt.axis('off')
-
-            # 保存错误样本图片
-            wrong_img_path = os.path.join(args.log_dir, f'wrong_samples_{session_str}.png')
-            plt.tight_layout()
-            plt.savefig(wrong_img_path)
-            plt.close()
-            args.logger.info(f"错误样本图片已保存到: {wrong_img_path}")
-
-        # 4. 生成类别混淆矩阵
         try:
             from sklearn.metrics import confusion_matrix
+            import matplotlib.pyplot as plt
             import seaborn as sns
 
-            # 获取所有预测结果和真实标签
-            y_true = [sample['true'] for sample in all_samples]
-            y_pred = [sample['pred'] for sample in all_samples]
+            # Get all classes present in the data
+            all_classes = sorted(list(set(targets.tolist() + preds.tolist())))
 
-            # 获取所有出现的类别
-            all_classes = sorted(list(set(y_true + y_pred)))
+            # Generate confusion matrix
+            cm = confusion_matrix(targets, preds, labels=all_classes)
 
-            # 生成混淆矩阵
-            cm = confusion_matrix(y_true, y_pred, labels=all_classes)
-
-            # 计算准确率
-            class_acc = np.zeros(len(all_classes))
-            for i, cls in enumerate(all_classes):
-                cls_samples = [s for s in all_samples if s['true'] == cls]
-                if cls_samples:
-                    correct = sum(1 for s in cls_samples if s['is_correct'])
-                    class_acc[i] = correct / len(cls_samples)
-
-            # 显示混淆矩阵
+            # Create the plot
             plt.figure(figsize=(12, 10))
-
-            # 使用Seaborn绘制更美观的热力图
-            # sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-            #             xticklabels=[f"{i}:{class_names[i]}" if i < len(class_names) else i for i in all_classes],
-            #             yticklabels=[f"{i}:{class_names[i]}" if i < len(class_names) else i for i in all_classes])
-
             sns.heatmap(cm, fmt='d', cmap='Blues',
                         xticklabels=all_classes,
                         yticklabels=all_classes)
 
-            plt.xlabel(' Prediction')
-            plt.ylabel(' Ground Truth')
-            plt.title(f'{session_str} Confusion Matrix')
+            plt.xlabel('Prediction')
+            plt.ylabel('Ground Truth')
+            plt.title(f'Confusion Matrix (Epoch {epoch})')
 
-            # 保存混淆矩阵
+            # Determine which session we're in
+            current_session = 1
+            if hasattr(args, 'num_seen_classes') and hasattr(args, 'num_labeled_classes') and hasattr(args,
+                                                                                                      'num_novel_class_per_session'):
+                if args.num_seen_classes > args.num_labeled_classes:
+                    completed_sessions = (
+                                                     args.num_seen_classes - args.num_labeled_classes) // args.num_novel_class_per_session
+                    current_session = completed_sessions + 1
+
+            session_str = f"session_{current_session}"
+
+            # Save confusion matrix
             conf_matrix_path = os.path.join(args.log_dir, f'confusion_matrix_{session_str}.png')
             plt.tight_layout()
             plt.savefig(conf_matrix_path)
             plt.close()
-            args.logger.info(f"类别混淆矩阵已保存到: {conf_matrix_path}")
+            args.logger.info(f"Confusion matrix saved to: {conf_matrix_path}")
 
-            # 显示各类别准确率
-            args.logger.info("\n各类别准确率:")
-            for i, cls in enumerate(all_classes):
-                cls_name = class_names[cls] if cls < len(class_names) else f"未知({cls})"
-                args.logger.info(f"  类别 {cls} ({cls_name}): {class_acc[i] * 100:.2f}%")
         except Exception as e:
-            args.logger.info(f"无法生成混淆矩阵: {str(e)}")
+            args.logger.info(f"Could not generate confusion matrix: {str(e)}")
 
     # -----------------------
-    # EVALUATE
+    # Calculate metrics with standard approach
     # -----------------------
     all_acc, old_acc, new_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_hard,
                                                     T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
@@ -1131,19 +569,13 @@ def test_online(model, test_loader, epoch, save_name, args):
                                                              T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
                                                              args=args)
 
-    # 打印总结信息
-    args.logger.info(f"\n测试结果总结 (Epoch {epoch}):")
-    args.logger.info(f"Hard分类指标: 全部={all_acc:.4f}, 旧类={old_acc:.4f}, 新类={new_acc:.4f}")
-    args.logger.info(f"Soft分类指标: 全部={all_acc_soft:.4f}, 已见={seen_acc:.4f}, 未见={unseen_acc:.4f}")
-
-    # 如果是session结束，打印错误率信息
-    if is_session_end:
-        error_count = len(wrong_samples)
-        total_count = len(all_samples)
-        error_rate = error_count / total_count if total_count > 0 else 0
-        args.logger.info(f"Session {current_session} 错误率: {error_rate * 100:.2f}% ({error_count}/{total_count})")
+    # Log results summary
+    args.logger.info(f"\nTest results summary (Epoch {epoch}):")
+    args.logger.info(f"Hard metrics: All={all_acc:.4f}, Old={old_acc:.4f}, New={new_acc:.4f}")
+    args.logger.info(f"Soft metrics: All={all_acc_soft:.4f}, Seen={seen_acc:.4f}, Unseen={unseen_acc:.4f}")
 
     return all_acc, old_acc, new_acc, all_acc_soft, seen_acc, unseen_acc
+
 '''====================================================================================================================='''
 
 
@@ -1399,50 +831,6 @@ if __name__ == "__main__":
             else:
                 args.num_cur_novel_classes = args.num_novel_class_per_session * (session+1)
             args.logger.info('number of all novel class (seen novel + unseen novel) in current session: {}'.format(args.num_cur_novel_classes))
-
-            # ---------- 在这里添加新代码 ----------
-            # 打印类别详细信息
-            args.logger.info("\n详细类别信息:")
-
-            # 1. 打印已知类(Known classes)信息
-            known_classes = list(range(args.num_labeled_classes))  # 已知类的索引
-            known_class_names = [str(cls) for cls in known_classes]  # 如果没有类名就用索引
-            args.logger.info(f"已知类({len(known_classes)}个): {known_class_names}")
-
-            # 2. 打印已见类(Seen classes)信息 - 仅当不是第一个session时
-            if session > 0:
-                seen_novel_classes = list(range(args.num_labeled_classes, args.num_seen_classes))
-                seen_novel_class_names = [str(cls) for cls in seen_novel_classes]
-                args.logger.info(f"已见新类({len(seen_novel_classes)}个): {seen_novel_class_names}")
-
-            # 3. 打印当前session的新类信息
-            current_novel_classes = []
-
-            # 根据不同数据集获取新类
-            if args.dataset_name == 'cifar100':
-                current_novel_classes = np.unique(online_session_train_dataset.novel_unlabelled_dataset.targets)
-            elif args.dataset_name == 'tiny_imagenet':
-                novel_cls_labels = [t for i, (p, t) in
-                                    enumerate(online_session_train_dataset.novel_unlabelled_dataset.data)]
-                current_novel_classes = np.unique(novel_cls_labels)
-            elif args.dataset_name == 'aircraft':
-                novel_cls_labels = [t for i, (p, t) in
-                                    enumerate(online_session_train_dataset.novel_unlabelled_dataset.samples)]
-                current_novel_classes = np.unique(novel_cls_labels)
-            elif args.dataset_name == 'scars':
-                current_novel_classes = np.unique(online_session_train_dataset.novel_unlabelled_dataset.target)
-            else:
-                # 如果没有特定处理，使用索引范围
-                start_idx = args.num_seen_classes
-                end_idx = args.num_labeled_classes + args.num_cur_novel_classes
-                current_novel_classes = list(range(start_idx, end_idx))
-
-            # 转换为名称并打印
-            current_novel_class_names = [str(cls) for cls in current_novel_classes]
-            args.logger.info(f"当前新类({len(current_novel_classes)}个): {current_novel_class_names}")
-            # ---------- 新增代码结束 ----------
-
-
             '''tunable params in backbone'''
             ####################################################################################################################
             # freeze backbone params
