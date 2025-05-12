@@ -68,14 +68,17 @@ class ProtoAugManager:
         # mean_similarity越高，表示原型之间越相似，采样概率越高，越需要关注这部分。
         sampling_prob = F.softmax(self.mean_similarity / self.hardness_temp, dim=-1)
         sampling_prob = sampling_prob.cpu().numpy()
+        # prototypes_labels = [5,5,6,7,9,11...] (范围是t-1 session的原型个数)
         prototypes_labels = np.random.choice(len(prototypes), size=(self.batch_size,), replace=True, p=sampling_prob)
+
         prototypes_labels = torch.from_numpy(prototypes_labels).long().to(self.device)
 
         prototypes_sampled = prototypes[prototypes_labels]
         """
-        这里生成的是以原型为中心，以 radius * radius_scale 为标准差的多元高斯随机向量。
-        它控制了在原型周围采样的范围大小。这样的分布模型使得系统能够生成与原始类别样本相似但又不完全相同的合成特征，用于保持模型对旧类别的记忆。
-        从一个以 prototypes_sampled 为中心的多元高斯分布中采样，并加上采样的噪声向量。
+        参考ProtoAug论文
+        prototypes_sampled 是一个原型矩阵(batch_size,feature_dim)
+        prototypes_augmented 是prototypes_sampled经过加强的原型矩阵
+        然后用t-1时刻的prototypes_augmented喂给t时刻分类器，以强化seen类的分类边界
         """
         # 从分布中采样
         # prototypes_augmented 包含了 batch_size 个样本

@@ -262,6 +262,7 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             # represent learning, unsup
             contrastive_logits, contrastive_labels = info_nce_logits(features=student_proj)
             contrastive_loss = torch.nn.CrossEntropyLoss()(contrastive_logits, contrastive_labels)
+            # ProtoAug_Loss
             proto_aug_loss = proto_aug_manager.compute_proto_aug_hardness_aware_loss(student)
             feats = student[0](images)
             feats = torch.nn.functional.normalize(feats, dim=-1)
@@ -515,7 +516,7 @@ def test_online(model, test_loader, epoch, save_name, args):
     # -----------------------
     # Generate confusion matrix
     # -----------------------
-    if hasattr(args, 'log_dir'):
+    if hasattr(args, 'log_dir') and hasattr(args,'epochs_online_per_session') and epoch == args.epochs_online_per_session - 1:
         try:
             from sklearn.metrics import confusion_matrix
             import matplotlib.pyplot as plt
