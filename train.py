@@ -227,6 +227,34 @@ def test_offline(model, test_loader, epoch, save_name, args):
 '''====================================================================================================================='''
 def train_online(student, student_pre, proto_aug_manager, train_loader, test_loader, current_session, args):
 
+    if hasattr(args, 'prompt_pool') and args.prompt_pool.prompts is None:
+        prompt_pool_path = os.path.join(args.model_dir, 'prompt_pool.pt')
+        if os.path.exists(prompt_pool_path):
+            args.logger.info(f"Loading prompt pool from {prompt_pool_path}")
+            args.prompt_pool.load_prompt_pool(prompt_pool_path, device=args.device)
+        else:
+            args.logger.warning(f"Prompt pool not found at {prompt_pool_path}")
+
+    # Wrap the model with prompt enhancement
+    from models.prompt_enhanced_model import PromptEnhancedModel
+
+    # Create enhanced models for both current and previous models
+    enhanced_student = PromptEnhancedModel(
+        backbone=student[0],
+        projector=student[1],
+        prompt_pool=args.prompt_pool if hasattr(args, 'prompt_pool') else None,
+        top_k=5  # You may want to tune this
+    )
+
+    enhanced_student_pre = PromptEnhancedModel(
+        backbone=student_pre[0],
+        projector=student_pre[1],
+        prompt_pool=args.prompt_pool if hasattr(args, 'prompt_pool') else None,
+        top_k=5
+    )
+
+
+
     params_groups = get_params_groups(student)
     optimizer = SGD(params_groups, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
 
