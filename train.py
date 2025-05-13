@@ -672,15 +672,7 @@ if __name__ == "__main__":
 
     init_experiment(args, runner_name=['Happy'])
     args.logger.info(f'Using evaluation function {args.eval_funcs[0]} to print results')
-
-    # Initialize prompt pool
-    args.device = device  # Make sure device is accessible in args
-    args.prompt_pool = PromptPool(
-        feature_dim=args.feat_dim,
-        similarity_threshold=0.7,
-        community_ratio=1.4,
-        device=device
-    )
+    args.device = device
 
     # ----------------------
     # BASE MODEL
@@ -699,6 +691,14 @@ if __name__ == "__main__":
     args.feat_dim = 768
     args.num_mlp_layers = 3
     args.mlp_out_dim = args.num_labeled_classes   # NOTE!!!
+
+    # Initialize prompt pool
+    args.prompt_pool = PromptPool(
+        feature_dim=args.feat_dim,
+        similarity_threshold=0.7,
+        community_ratio=1.4,
+        device=device
+    )
 
     # ----------------------
     # HOW MUCH OF BASE MODEL TO FINETUNE
