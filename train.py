@@ -640,6 +640,10 @@ if __name__ == "__main__":
     parser.add_argument('--print_freq', default=10, type=int)
     parser.add_argument('--exp_name', default='simgcd-pro-v5', type=str)
 
+    '''prompt pool'''
+    parser.add_argument('--prompt_pool', action='store_true', default=False,
+                        help='Use prompt pool for feature enhancement')
+
 
     # ----------------------
     # INIT
