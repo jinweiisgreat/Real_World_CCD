@@ -228,13 +228,14 @@ def test_offline(model, test_loader, epoch, save_name, args):
 
 
 def train_online(student, student_pre, proto_aug_manager, train_loader, test_loader, current_session, args):
-    if hasattr(args, 'prompt_pool') and args.prompt_pool.prompts is None:
-        prompt_pool_path = os.path.join(args.model_dir, 'prompt_pool.pt')
-        if os.path.exists(prompt_pool_path):
-            args.logger.info(f"Loading prompt pool from {prompt_pool_path}")
-            args.prompt_pool.load_prompt_pool(prompt_pool_path, device=args.device)
-        else:
-            args.logger.warning(f"Prompt pool not found at {prompt_pool_path}")
+    offline_model_dir = os.path.join(exp_root + '_offline', args.dataset_name, args.load_offline_id, 'checkpoints')
+    prompt_pool_path = os.path.join(offline_model_dir, 'prompt_pool.pt')
+
+    if os.path.exists(prompt_pool_path):
+        args.logger.info(f"Loading prompt pool from {prompt_pool_path}")
+        args.prompt_pool.load_prompt_pool(prompt_pool_path, device=args.device)
+    else:
+        args.logger.warning(f"Prompt pool not found at {prompt_pool_path}")
 
     # Wrap the model with prompt enhancement
     from models.prompt_enhanced_model import PromptEnhancedModel

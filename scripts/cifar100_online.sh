@@ -29,7 +29,7 @@ CUDA_VISIBLE_DEVICES=0 python train.py \
     --online_old_seen_num 25 \
     --online_novel_seen_num 25 \
     --init_new_head \
-    --load_offline_id best \
+    --load_offline_id Old50_Ratio0.8_20250513-155706 \
     --shuffle_classes \
     --seed 0 \
     --prompt_pool
