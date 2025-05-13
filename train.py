@@ -225,8 +225,9 @@ def test_offline(model, test_loader, epoch, save_name, args):
 
 '''online train and test'''
 '''====================================================================================================================='''
-def train_online(student, student_pre, proto_aug_manager, train_loader, test_loader, current_session, args):
 
+
+def train_online(student, student_pre, proto_aug_manager, train_loader, test_loader, current_session, args):
     if hasattr(args, 'prompt_pool') and args.prompt_pool.prompts is None:
         prompt_pool_path = os.path.join(args.model_dir, 'prompt_pool.pt')
         if os.path.exists(prompt_pool_path):
@@ -253,24 +254,23 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
         top_k=5
     )
 
-
-
-    params_groups = get_params_groups(student)
+    # Use enhanced models for optimization
+    params_groups = get_params_groups(enhanced_student)
     optimizer = SGD(params_groups, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
 
     exp_lr_scheduler = lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=args.epochs_online_per_session,
-            eta_min=args.lr * 1e-3,
-        )
+        optimizer,
+        T_max=args.epochs_online_per_session,
+        eta_min=args.lr * 1e-3,
+    )
 
     cluster_criterion = DistillLoss(
-                        args.warmup_teacher_temp_epochs,
-                        args.epochs_online_per_session,
-                        args.n_views,
-                        args.warmup_teacher_temp,
-                        args.teacher_temp,
-                    )
+        args.warmup_teacher_temp_epochs,
+        args.epochs_online_per_session,
+        args.n_views,
+        args.warmup_teacher_temp,
+        args.teacher_temp,
+    )
 
     # best acc log
     best_test_acc_all = 0
@@ -284,72 +284,65 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
     for epoch in range(args.epochs_online_per_session):
         loss_record = AverageMeter()
 
-        student.train()
-        student_pre.eval()
+        enhanced_student.train()
+        enhanced_student_pre.eval()
         for batch_idx, batch in enumerate(train_loader):
 
-            images, class_labels, uq_idxs, _ = batch   # NOTE!!!   mask lab in this setting
-            mask_lab = torch.zeros_like(class_labels)   # NOTE!!! all samples are unlabeled
+            images, class_labels, uq_idxs, _ = batch  # NOTE!!!   mask lab in this setting
+            mask_lab = torch.zeros_like(class_labels)  # NOTE!!! all samples are unlabeled
 
             class_labels, mask_lab = class_labels.cuda(non_blocking=True), mask_lab.cuda(non_blocking=True).bool()
             images = torch.cat(images, dim=0).cuda(non_blocking=True)
 
-            student_proj, student_out = student(images)
+            # Use enhanced student for forward pass
+            student_proj, student_out = enhanced_student(images)
             teacher_out = student_out.detach()
 
             # clustering, unsup
             cluster_loss = cluster_criterion(student_out, teacher_out, epoch)
-            '''
-            求每个类的平均预测概率
-            例子：
-            Softmax probabilities:
-                tensor([[9.9995e-01, 4.5398e-05, 2.0611e-09, 2.2603e-07],
-                        [2.0611e-09, 9.9999e-01, 9.1188e-07, 1.6702e-10],
-                        [2.2603e-07, 2.0611e-09, 9.9995e-01, 4.5398e-05]])
-            Average probabilities across samples:
-                tensor([0.3333, 0.3333, 0.3333, 0.0000])
-            第四个类的平均预测概率是0.0000，表示模型对这个类的预测概率很低。
-            '''
             avg_probs = (student_out / 0.1).softmax(dim=1).mean(dim=0)
-
-            '''
-            通过最小化负熵（即最大化熵），鼓励模型在旧类别和新类别之间分配更均匀的注意力，从而减少类别间的预测偏差。
-            '''
 
             # 1. inter old and new
             avg_probs_old_in = avg_probs[:args.num_seen_classes]
             avg_probs_new_in = avg_probs[args.num_seen_classes:]
 
-            # torch.sum(avg_probs_old_in) 将所有旧类别的预测概率加总，得到模型对旧类别的整体关注程度。avg_probs_new_marginal同理。
             avg_probs_old_marginal, avg_probs_new_marginal = torch.sum(avg_probs_old_in), torch.sum(avg_probs_new_in)
-            me_max_loss_old_new =  avg_probs_old_marginal * torch.log(avg_probs_old_marginal) + avg_probs_new_marginal * torch.log(avg_probs_new_marginal) + math.log(2)
+            me_max_loss_old_new = avg_probs_old_marginal * torch.log(
+                avg_probs_old_marginal) + avg_probs_new_marginal * torch.log(avg_probs_new_marginal) + math.log(2)
 
             # 2. old (intra) & new (intra)
-            avg_probs_old_in_norm = avg_probs_old_in / torch.sum(avg_probs_old_in)   # norm
-            avg_probs_new_in_norm = avg_probs_new_in / torch.sum(avg_probs_new_in)   # norm
-            me_max_loss_old_in = - torch.sum(torch.log(avg_probs_old_in_norm**(-avg_probs_old_in_norm))) + math.log(float(len(avg_probs_old_in_norm)))
+            avg_probs_old_in_norm = avg_probs_old_in / torch.sum(avg_probs_old_in)  # norm
+            avg_probs_new_in_norm = avg_probs_new_in / torch.sum(avg_probs_new_in)  # norm
+            me_max_loss_old_in = - torch.sum(torch.log(avg_probs_old_in_norm ** (-avg_probs_old_in_norm))) + math.log(
+                float(len(avg_probs_old_in_norm)))
             if args.num_novel_class_per_session > 1:
-                me_max_loss_new_in = - torch.sum(torch.log(avg_probs_new_in_norm**(-avg_probs_new_in_norm))) + math.log(float(len(avg_probs_new_in_norm)))
+                me_max_loss_new_in = - torch.sum(
+                    torch.log(avg_probs_new_in_norm ** (-avg_probs_new_in_norm))) + math.log(
+                    float(len(avg_probs_new_in_norm)))
             else:
-                me_max_loss_new_in = torch.tensor(0.0, device=device)
+                me_max_loss_new_in = torch.tensor(0.0, device=args.device)
             # overall me-max loss
             cluster_loss += args.memax_old_new_weight * me_max_loss_old_new + \
-                args.memax_old_in_weight * me_max_loss_old_in + args.memax_new_in_weight * me_max_loss_new_in
-
+                            args.memax_old_in_weight * me_max_loss_old_in + args.memax_new_in_weight * me_max_loss_new_in
 
             # represent learning, unsup
             contrastive_logits, contrastive_labels = info_nce_logits(features=student_proj)
             contrastive_loss = torch.nn.CrossEntropyLoss()(contrastive_logits, contrastive_labels)
-            # ProtoAug_Loss
+
+            # ProtoAug_Loss - adapt to use enhanced student
+            # We need to adapt proto_aug_manager to work with enhanced student
+            # For now, we'll use the original student for this loss
             proto_aug_loss = proto_aug_manager.compute_proto_aug_hardness_aware_loss(student)
-            feats = student[0](images)
+
+            # Get features from enhanced models
+            feats = enhanced_student.backbone(images)
             feats = torch.nn.functional.normalize(feats, dim=-1)
             with torch.no_grad():
-                feats_pre = student_pre[0](images)
+                feats_pre = enhanced_student_pre.backbone(images)
                 feats_pre = torch.nn.functional.normalize(feats_pre, dim=-1)
 
-            # 这行代码计算的是特征蒸馏损失，用于让学生网络的特征模仿教师网络的输出，从而在增量学习中帮助保留之前学到的知识，减少灾难性遗忘。
-            feat_distill_loss = (feats-feats_pre).pow(2).sum() / len(feats)
+            # Feature distillation between enhanced models
+            feat_distill_loss = (feats - feats_pre).pow(2).sum() / len(feats)
 
             # Total loss
             loss = 0
@@ -375,36 +368,52 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
 
             if batch_idx % args.print_freq == 0:
                 args.logger.info('Epoch: [{}][{}/{}]\t loss {:.5f}\t {}'
-                            .format(epoch, batch_idx, len(train_loader), loss.item(), pstr))
-                new_true_ratio = len(class_labels[class_labels>=args.num_seen_classes]) / len(class_labels)
+                                 .format(epoch, batch_idx, len(train_loader), loss.item(), pstr))
+                new_true_ratio = len(class_labels[class_labels >= args.num_seen_classes]) / len(class_labels)
                 logits = student_out / 0.1
                 preds = logits.argmax(1)
-                new_pred_ratio = len(preds[preds>=args.num_seen_classes]) / len(preds)
-                args.logger.info(f'Avg old prob: {torch.sum(avg_probs_old_in).item():.4f} | Avg new prob: {torch.sum(avg_probs_new_in).item():.4f} | Pred new ratio: {new_pred_ratio:.4f} | Ground-truth new ratio: {new_true_ratio:.4f}')
+                new_pred_ratio = len(preds[preds >= args.num_seen_classes]) / len(preds)
+                args.logger.info(
+                    f'Avg old prob: {torch.sum(avg_probs_old_in).item():.4f} | Avg new prob: {torch.sum(avg_probs_new_in).item():.4f} | Pred new ratio: {new_pred_ratio:.4f} | Ground-truth new ratio: {new_true_ratio:.4f}')
 
         args.logger.info('Train Epoch: {} Avg Loss: {:.4f} '.format(epoch, loss_record.avg))
 
         args.logger.info('Testing on disjoint test set...')
+        # Modify test_online to accept enhanced_student
         all_acc_test, old_acc_test, new_acc_test, \
-            all_acc_soft_test, seen_acc_test, unseen_acc_test = test_online(student, test_loader, epoch=epoch, save_name='Test ACC', args=args)
-        args.logger.info('Test Accuracies (Hard): All {:.4f} | Old {:.4f} | New {:.4f}'.format(all_acc_test, old_acc_test, new_acc_test))
-        args.logger.info('Test Accuracies (Soft): All {:.4f} | Seen {:.4f} | Unseen {:.4f}'.format(all_acc_soft_test, seen_acc_test, unseen_acc_test))
+            all_acc_soft_test, seen_acc_test, unseen_acc_test = test_online(enhanced_student, test_loader, epoch=epoch,
+                                                                            save_name='Test ACC', args=args)
+        args.logger.info(
+            'Test Accuracies (Hard): All {:.4f} | Old {:.4f} | New {:.4f}'.format(all_acc_test, old_acc_test,
+                                                                                  new_acc_test))
+        args.logger.info(
+            'Test Accuracies (Soft): All {:.4f} | Seen {:.4f} | Unseen {:.4f}'.format(all_acc_soft_test, seen_acc_test,
+                                                                                      unseen_acc_test))
 
         # Step schedule
         exp_lr_scheduler.step()
 
+        # Save enhanced student model
         save_dict = {
-            'model': student.state_dict(),
+            'model': enhanced_student.state_dict(),
             'optimizer': optimizer.state_dict(),
             'epoch': epoch + 1,
         }
 
         if all_acc_test > best_test_acc_all:
-
             args.logger.info(f'Best ACC on All Classes on test set of session-{current_session}: {all_acc_test:.4f}...')
 
-            torch.save(save_dict, args.model_path[:-3] + '_session-' + str(current_session) + f'_best.pt')   # NOTE!!! session
-            args.logger.info("model saved to {}.".format(args.model_path[:-3] + '_session-' + str(current_session) + f'_best.pt'))
+            torch.save(save_dict,
+                       args.model_path[:-3] + '_session-' + str(current_session) + f'_best.pt')  # NOTE!!! session
+            args.logger.info(
+                "model saved to {}.".format(args.model_path[:-3] + '_session-' + str(current_session) + f'_best.pt'))
+
+            # Also save original student for compatibility with later sessions
+            torch.save({
+                'model': student.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'epoch': epoch + 1,
+            }, args.model_path[:-3] + '_session-' + str(current_session) + f'_best_original.pt')
 
             best_test_acc_all = all_acc_test
             best_test_acc_old = old_acc_test
@@ -415,10 +424,11 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             best_test_acc_unseen = unseen_acc_test
 
         args.logger.info(f'Exp Name: {args.exp_name}')
-        args.logger.info(f'Metrics with best model on test set (Hard) of session-{current_session}: All (Hard): {best_test_acc_all:.4f} Old: {best_test_acc_old:.4f} New: {best_test_acc_new:.4f}')
-        args.logger.info(f'Metrics with best model on test set (Hard) of session-{current_session}: All (Soft): {best_test_acc_soft_all:.4f} Seen: {best_test_acc_seen:.4f} Unseen: {best_test_acc_unseen:.4f}')
+        args.logger.info(
+            f'Metrics with best model on test set (Hard) of session-{current_session}: All (Hard): {best_test_acc_all:.4f} Old: {best_test_acc_old:.4f} New: {best_test_acc_new:.4f}')
+        args.logger.info(
+            f'Metrics with best model on test set (Hard) of session-{current_session}: All (Soft): {best_test_acc_soft_all:.4f} Seen: {best_test_acc_seen:.4f} Unseen: {best_test_acc_unseen:.4f}')
         args.logger.info('\n')
-
 
     # log best test acc list
     args.best_test_acc_all_list.append(best_test_acc_all)
@@ -428,12 +438,16 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
     args.best_test_acc_seen_list.append(best_test_acc_seen)
     args.best_test_acc_unseen_list.append(best_test_acc_unseen)
 
+    # Return enhanced student to use for next session or for other purposes
+    # return enhanced_student
+
+
 def test_online(model, test_loader, epoch, save_name, args):
     """
-    Online testing function that only generates a confusion matrix.
+    Online testing function that works with both regular and enhanced models.
 
     Args:
-        model: Model to evaluate
+        model: Model to evaluate (can be regular model or PromptEnhancedModel)
         test_loader: Test data loader
         epoch: Current training epoch
         save_name: Name for saving results
@@ -465,11 +479,16 @@ def test_online(model, test_loader, epoch, save_name, args):
         images = images.cuda(non_blocking=True)
 
         with torch.no_grad():
-            # Get model predictions
-            try:
+            # Get model predictions - handle both regular and enhanced models
+            if hasattr(model, 'backbone') and hasattr(model, 'projector'):
+                # This is an enhanced model
                 _, logits = model(images)
-            except:
-                logits = model(images)
+            else:
+                # This is a regular model (Sequential)
+                try:
+                    _, logits = model(images)
+                except:
+                    logits = model(images)
 
             batch_preds = logits.argmax(1).cpu().numpy()
             preds.append(batch_preds)
@@ -487,7 +506,8 @@ def test_online(model, test_loader, epoch, save_name, args):
     # -----------------------
     # Generate confusion matrix
     # -----------------------
-    if hasattr(args, 'log_dir') and hasattr(args,'epochs_online_per_session') and epoch == args.epochs_online_per_session - 1:
+    if hasattr(args, 'log_dir') and hasattr(args,
+                                            'epochs_online_per_session') and epoch == args.epochs_online_per_session - 1:
         try:
             from sklearn.metrics import confusion_matrix
             import matplotlib.pyplot as plt
@@ -515,7 +535,7 @@ def test_online(model, test_loader, epoch, save_name, args):
                                                                                                       'num_novel_class_per_session'):
                 if args.num_seen_classes > args.num_labeled_classes:
                     completed_sessions = (
-                                                     args.num_seen_classes - args.num_labeled_classes) // args.num_novel_class_per_session
+                                                 args.num_seen_classes - args.num_labeled_classes) // args.num_novel_class_per_session
                     current_session = completed_sessions + 1
 
             session_str = f"session_{current_session}"
@@ -648,6 +668,15 @@ if __name__ == "__main__":
 
     init_experiment(args, runner_name=['Happy'])
     args.logger.info(f'Using evaluation function {args.eval_funcs[0]} to print results')
+
+    # Initialize prompt pool
+    args.device = device  # Make sure device is accessible in args
+    args.prompt_pool = PromptPool(
+        feature_dim=args.feat_dim,
+        similarity_threshold=0.7,
+        community_ratio=1.4,
+        device=device
+    )
 
     # ----------------------
     # BASE MODEL
