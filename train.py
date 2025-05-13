@@ -149,7 +149,46 @@ def train_offline(student, train_loader, test_loader, args):
         args.logger.info(f'Metrics with best model on test set: Old: {best_test_acc_old:.4f}')
         args.logger.info('\n')
 
-        # After training is complete, we can create the prompt pool
+    # After training is complete, we can create the prompt pool
+    if not hasattr(args, 'prompt_pool'):
+        args.prompt_pool = PromptPool(
+            feature_dim=args.feat_dim,
+            similarity_threshold=0.7,  # You may want to tune this
+            community_ratio=1.4,  # Aim for 1.4x number of classes as communities
+            device=args.device
+        )
+
+    args.logger.info("Creating prompt pool from offline training data...")
+    # Use a clean data loader without augmentations for feature extraction
+    clean_dataset = deepcopy(train_loader.dataset)
+    clean_dataset.transform = test_transform  # Use test transform without augmentations
+    clean_loader = DataLoader(
+        clean_dataset,
+        num_workers=args.num_workers_test,
+        batch_size=256,
+        shuffle=False,
+        pin_memory=False
+    )
+
+    # Create the prompt pool
+    prompt_pool_stats = args.prompt_pool.create_prompt_pool(
+        model=student,
+        data_loader=clean_loader,
+        num_classes=args.num_labeled_classes,
+        logger=args.logger
+    )
+
+    # Save the prompt pool
+    prompt_pool_path = os.path.join(args.model_dir, 'prompt_pool.pt')
+    args.prompt_pool.save_prompt_pool(prompt_pool_path)
+    args.logger.info(f"Prompt pool saved to {prompt_pool_path}")
+
+    # Save prompt pool statistics
+    prompt_pool_stats_path = os.path.join(args.model_dir, 'prompt_pool_stats.pt')
+    torch.save(prompt_pool_stats, prompt_pool_stats_path)
+    args.logger.info(f"Prompt pool statistics saved to {prompt_pool_stats_path}")
+
+    return best_test_acc_old
 
 
 
@@ -360,113 +399,6 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
     args.best_test_acc_soft_all_list.append(best_test_acc_soft_all)
     args.best_test_acc_seen_list.append(best_test_acc_seen)
     args.best_test_acc_unseen_list.append(best_test_acc_unseen)
-
-# 手动计算匈牙利匹配
-"""
-def test_online(model, test_loader, epoch, save_name, args):
-    model.eval()
-
-    preds, targets = [], []
-    mask_hard = np.array([])
-    mask_soft = np.array([])
-    for batch_idx, (images, label, _) in enumerate(tqdm(test_loader)):
-        images = images.cuda(non_blocking=True)
-        with torch.no_grad():
-            _, logits = model(images)
-            preds.append(logits.argmax(1).cpu().numpy())
-            targets.append(label.cpu().numpy())
-
-            # args.train_classes 原始训练时定义的类别
-            mask_hard = np.append(mask_hard, np.array([True if x.item() in range(len(args.train_classes))
-                                                       else False for x in label]))
-            # args.num_seen_classes 当前已见类别范围
-            mask_soft = np.append(mask_soft, np.array([True if x.item() in range(args.num_seen_classes)
-                                                       else False for x in label]))
-
-    preds = np.concatenate(preds)
-    targets = np.concatenate(targets)
-
-    # -----------------------
-    # EVALUATE
-    # -----------------------
-    all_acc, old_acc, new_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_hard,
-                                                    T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
-                                                    args=args)
-
-    all_acc_soft, seen_acc, unseen_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_soft,
-                                                             T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
-                                                             args=args)
-
-    # 手动计算各个准确率 - 使用匈牙利算法进行标签重映射
-    from scipy.optimize import linear_sum_assignment
-
-    # 构建混淆矩阵
-    D = max(preds.max(), targets.max()) + 1
-    w = np.zeros((D, D), dtype=int)
-    for i in range(preds.size):
-        w[preds[i], targets[i]] += 1
-
-    # 应用匈牙利算法找到最佳标签映射
-    row_ind, col_ind = linear_sum_assignment(w.max() - w)
-    ind_map = {j: i for i, j in zip(col_ind, row_ind)}
-
-    # 重映射预测结果
-    remapped_preds = np.array([ind_map.get(p, p) for p in preds])
-
-    # 整体准确率 (使用重映射后的预测)
-    all_correct = np.sum(remapped_preds == targets)
-    all_total = len(targets)
-    all_Acc = all_correct / all_total
-    all_Acc_soft = all_Acc  # 这两个是相同的
-    print("all_Acc (remapped):", all_Acc)
-
-    # 旧类别准确率 (使用mask_hard和重映射后的预测)
-    old_preds = remapped_preds[mask_hard.astype(bool)]
-    old_targets = targets[mask_hard.astype(bool)]
-    old_correct = np.sum(old_preds == old_targets)
-    old_total = len(old_targets)
-    old_Acc = old_correct / max(old_total, 1)
-    print("old_Acc (remapped):", old_Acc)
-
-    # 新类别准确率 (使用mask_hard的反面和重映射后的预测)
-    new_preds = remapped_preds[~mask_hard.astype(bool)]
-    new_targets = targets[~mask_hard.astype(bool)]
-    new_correct = np.sum(new_preds == new_targets)
-    new_total = len(new_targets)
-    new_Acc = new_correct / max(new_total, 1)
-    print("new_Acc (remapped):", new_Acc)
-
-    # 已见类别准确率 (使用mask_soft和重映射后的预测)
-    seen_preds = remapped_preds[mask_soft.astype(bool)]
-    seen_targets = targets[mask_soft.astype(bool)]
-    seen_correct = np.sum(seen_preds == seen_targets)
-    seen_total = len(seen_targets)
-    seen_Acc = seen_correct / max(seen_total, 1)
-    print("seen_Acc (remapped):", seen_Acc)
-
-    # 未见类别准确率 (使用mask_soft的反面和重映射后的预测)
-    unseen_preds = remapped_preds[~mask_soft.astype(bool)]
-    unseen_targets = targets[~mask_soft.astype(bool)]
-    unseen_correct = np.sum(unseen_preds == unseen_targets)
-    unseen_total = len(unseen_targets)
-    unseen_Acc = unseen_correct / max(unseen_total, 1)
-    print("unseen_Acc (remapped):", unseen_Acc)
-
-    # 输出未见类别的详细信息
-    args.logger.info(
-        f"Unseen correct (remapped): {unseen_correct}/{unseen_total} = {unseen_correct / max(unseen_total, 1):.4f}")
-
-    # 对比原始计算和重映射后的计算结果
-    args.logger.info(f"Comparing with log_accs_from_preds results:")
-    args.logger.info(f"All: {all_Acc:.4f} vs {all_acc:.4f}")
-    args.logger.info(f"Old: {old_Acc:.4f} vs {old_acc:.4f}")
-    args.logger.info(f"New: {new_Acc:.4f} vs {new_acc:.4f}")
-    args.logger.info(f"Seen: {seen_Acc:.4f} vs {seen_acc:.4f}")
-    args.logger.info(f"Unseen: {unseen_Acc:.4f} vs {unseen_acc:.4f}")
-
-    return all_acc, old_acc, new_acc, all_acc_soft, seen_acc, unseen_acc
-"""
-
 
 def test_online(model, test_loader, epoch, save_name, args):
     """
