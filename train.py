@@ -29,6 +29,7 @@ from models.utils_proto_aug import ProtoAugManager
 from models import vision_transformer as vits
 from config import dino_pretrain_path, exp_root
 from collections import Counter
+# import PromptPool
 from models.utils_prompt_pool import PromptPool
 
 import warnings
@@ -147,6 +148,9 @@ def train_offline(student, train_loader, test_loader, args):
         args.logger.info(f'Exp Name: {args.exp_name}')
         args.logger.info(f'Metrics with best model on test set: Old: {best_test_acc_old:.4f}')
         args.logger.info('\n')
+
+        # After training is complete, we can create the prompt pool
+
 
 
 def test_offline(model, test_loader, epoch, save_name, args):
