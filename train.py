@@ -31,6 +31,7 @@ from config import dino_pretrain_path, exp_root
 from collections import Counter
 # import PromptPool
 from models.utils_prompt_pool import PromptPool
+from models.prompt_enhanced_model import PromptEnhancedModel
 
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -236,9 +237,6 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
         args.prompt_pool.load_prompt_pool(prompt_pool_path, device=args.device)
     else:
         args.logger.warning(f"Prompt pool not found at {prompt_pool_path}")
-
-    # Wrap the model with prompt enhancement
-    from models.prompt_enhanced_model import PromptEnhancedModel
 
     # Create enhanced models for both current and previous models
     enhanced_student = PromptEnhancedModel(
@@ -720,7 +718,12 @@ if __name__ == "__main__":
     # PROJECTION HEAD
     # ----------------------
     projector = DINOHead(in_dim=args.feat_dim, out_dim=args.mlp_out_dim, nlayers=args.num_mlp_layers)
-    model = nn.Sequential(backbone, projector)
+    model = PromptEnhancedModel(
+        backbone=backbone,
+        projector=projector,
+        prompt_pool=args.prompt_pool if hasattr(args, 'prompt_pool') else None,
+        top_k=5  # 你可能想将这个设为参数
+    )
 
     model.to(device)
 
