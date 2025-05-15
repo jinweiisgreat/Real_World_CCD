@@ -1,3 +1,12 @@
+"""
+Modify: 添加prompt pool
+Date: 2025/05/14
+Author: Wei Jin
+
+update: 添加prompt pool update机制
+Date: 2025/05/15
+Author: Wei Jin
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

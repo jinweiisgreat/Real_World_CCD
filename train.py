@@ -24,7 +24,7 @@ from data.augmentations import get_transform
 from data.get_datasets import get_class_splits, ContrastiveLearningViewGenerator, get_datasets
 
 from models.utils_simgcd import DINOHead, get_params_groups, SupConLoss, info_nce_logits, DistillLoss
-from models.utils_simgcd_pro import get_kmeans_centroid_for_new_head
+from models.utils_simgcd_pro_prompt import get_kmeans_centroid_for_new_head
 from models.utils_proto_aug_prompt import ProtoAugManager
 from models import vision_transformer as vits
 from config import dino_pretrain_path, exp_root
