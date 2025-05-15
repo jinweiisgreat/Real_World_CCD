@@ -1,8 +1,8 @@
-'''
+"""
 Modify: 更改ProtoAug以适用Prompt Pool
 Date: 2025/5/14
 Author: Wei Jin
-'''
+"""
 
 import torch
 import torch.nn as nn
@@ -47,10 +47,16 @@ class ProtoAugManager:
 
         prototypes_sampled = prototypes[prototypes_labels]
         prototypes_augmented = prototypes_sampled + torch.randn((self.batch_size, self.feature_dim),
-                                                            device=self.device) * self.radius * self.radius_scale
+                                                                device=self.device) * self.radius * self.radius_scale
 
-        # 直接使用PromptEnhancedModel结构
-        _, prototypes_output = model.projector(prototypes_augmented)
+        # Handle both regular and enhanced models
+        if hasattr(model, 'backbone') and hasattr(model, 'projector'):
+            # This is an enhanced model
+            _, prototypes_output = model.projector(prototypes_augmented)
+        else:
+            # This is a regular model (Sequential)
+            _, prototypes_output = model[1](prototypes_augmented)
+
         proto_aug_loss = nn.CrossEntropyLoss()(prototypes_output / 0.1, prototypes_labels)
 
         return proto_aug_loss

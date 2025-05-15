@@ -60,7 +60,6 @@ class ProtoAugManager:
         return proto_aug_loss
 
     # 在每个在线阶段(Online Session)中，使用上一阶段保存的原型和难度分布进行采样
-    '''
     def compute_proto_aug_hardness_aware_loss(self, model):
         prototypes = F.normalize(self.prototypes, dim=-1, p=2).to(self.device)
 
@@ -87,32 +86,6 @@ class ProtoAugManager:
         #prototypes_augmented = F.normalize(prototypes_augmented, dim=-1, p=2) # NOTE!!! DO NOT normalize
         # forward prototypes and get logits
         _, prototypes_output = model[1](prototypes_augmented)
-        proto_aug_loss = nn.CrossEntropyLoss()(prototypes_output / 0.1, prototypes_labels)
-
-        return proto_aug_loss
-    '''
-
-    def compute_proto_aug_hardness_aware_loss(self, model):
-        prototypes = F.normalize(self.prototypes, dim=-1, p=2).to(self.device)
-
-        # hardness-aware sampling
-        sampling_prob = F.softmax(self.mean_similarity / self.hardness_temp, dim=-1)
-        sampling_prob = sampling_prob.cpu().numpy()
-        prototypes_labels = np.random.choice(len(prototypes), size=(self.batch_size,), replace=True, p=sampling_prob)
-        prototypes_labels = torch.from_numpy(prototypes_labels).long().to(self.device)
-
-        prototypes_sampled = prototypes[prototypes_labels]
-        prototypes_augmented = prototypes_sampled + torch.randn((self.batch_size, self.feature_dim),
-                                                                device=self.device) * self.radius * self.radius_scale
-
-        # Handle both regular and enhanced models
-        if hasattr(model, 'backbone') and hasattr(model, 'projector'):
-            # This is an enhanced model
-            _, prototypes_output = model.projector(prototypes_augmented)
-        else:
-            # This is a regular model (Sequential)
-            _, prototypes_output = model[1](prototypes_augmented)
-
         proto_aug_loss = nn.CrossEntropyLoss()(prototypes_output / 0.1, prototypes_labels)
 
         return proto_aug_loss

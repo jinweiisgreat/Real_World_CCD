@@ -17,7 +17,296 @@ import community as community_louvain
 import networkx as nx
 from sklearn.metrics.pairwise import cosine_similarity
 import matplotlib.pyplot as plt
-import seaborn as sns
+import os
+
+
+def visualize_graph_network(adjacency_matrix, save_path, max_nodes=5000, logger=None,
+                            similarity_threshold=None):
+    """
+    Visualize the graph network created from the adjacency matrix before community detection
+    using seaborn for better aesthetics, with options for displaying more nodes and edges.
+
+    Args:
+        adjacency_matrix: The adjacency matrix of the graph
+        save_path: Path to save the visualization
+        max_nodes: Maximum number of nodes to visualize (to avoid overcrowding)
+        logger: Logger to log progress
+        similarity_threshold: Current similarity threshold (for reference)
+    """
+    try:
+        import networkx as nx
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+
+        if logger:
+            logger.info(f"Creating enhanced graph network visualization with up to {max_nodes} nodes...")
+
+        # Set seaborn style for better aesthetics
+        sns.set(style="whitegrid", context="paper", font_scale=1.2)
+
+        # If the graph is too large, sample nodes
+        n = adjacency_matrix.shape[0]
+        if n > max_nodes:
+            # Sample more nodes to show larger network structure
+            indices = np.random.choice(n, max_nodes, replace=False)
+            sampled_adj_matrix = adjacency_matrix[indices][:, indices]
+            logger.info(f"Sampling {max_nodes} nodes from total {n} nodes for visualization")
+        else:
+            sampled_adj_matrix = adjacency_matrix
+            indices = np.arange(n)
+            logger.info(f"Using all {n} nodes for visualization")
+
+        # Create graph from adjacency matrix
+        G = nx.from_numpy_array(sampled_adj_matrix)
+
+        # Get initial statistics
+        initial_nodes = G.number_of_nodes()
+        initial_edges = G.number_of_edges()
+
+        # Get statistics for connected components
+        components = list(nx.connected_components(G))
+
+        if logger:
+            logger.info(f"Initial graph: {initial_nodes} nodes, {initial_edges} edges")
+            logger.info(f"Number of connected components: {len(components)}")
+            if len(components) > 0:
+                sizes = [len(c) for c in components]
+                logger.info(f"Largest component size: {max(sizes)}")
+                logger.info(f"Average component size: {sum(sizes) / len(sizes):.2f}")
+
+        # Calculate graph metrics
+        if G.number_of_nodes() > 0:  # Ensure the graph is not empty
+            avg_degree = sum(dict(G.degree()).values()) / G.number_of_nodes()
+            density = nx.density(G)
+        else:
+            avg_degree = 0
+            density = 0
+            if logger:
+                logger.warning("Graph has no connected nodes")
+            return
+
+        # Create a degree histogram visualization
+        plt.figure(figsize=(10, 6))
+        degree_sequence = sorted([d for n, d in G.degree()], reverse=True)
+        degreeCount = {i: degree_sequence.count(i) for i in set(degree_sequence)}
+
+        # Plot degree histogram
+        plt.bar(degreeCount.keys(), degreeCount.values(), color='skyblue', alpha=0.8)
+        plt.title(f"Node Degree Distribution (similarity threshold: {similarity_threshold})")
+        plt.xlabel("Degree")
+        plt.ylabel("Count")
+        plt.yscale('log')  # Log scale often works better for degree distributions
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        degree_hist_path = os.path.splitext(save_path)[0] + "_degree_hist.png"
+        plt.savefig(degree_hist_path, dpi=300)
+        plt.close()
+
+        if logger:
+            logger.info(f"Degree histogram saved to {degree_hist_path}")
+
+        # Setup main network visualization
+        plt.figure(figsize=(16, 14))
+
+        # If network is very large, we can visualize a simplified version
+        if initial_nodes > 2000:
+            # Identify largest connected components
+            largest_components = sorted(components, key=len, reverse=True)
+
+            # Take the top 3 largest components for better visualization
+            top_components = largest_components[:3]
+            nodes_in_top = sum(len(c) for c in top_components)
+
+            if logger:
+                logger.info(f"Visualizing top 3 components with {nodes_in_top} nodes total")
+
+            # Create subgraph of these components
+            nodes_to_keep = set().union(*top_components)
+            H = G.subgraph(nodes_to_keep)
+
+            # Compute positions - using sfdp layout for better distribution
+            pos = nx.spring_layout(
+                H,
+                k=0.2,  # Optimal distance between nodes (smaller = tighter)
+                iterations=50,  # More iterations for better layout
+                seed=42
+            )
+
+            # Determine node sizes based on degree
+            degrees = dict(H.degree())
+
+            # Scale node size inversely with node count to avoid overcrowding
+            size_scale = max(1, 1000 / np.sqrt(len(H)))
+            node_sizes = [3 + 1.5 * np.sqrt(degrees[n]) * size_scale for n in H.nodes()]
+
+            # Determine edge alpha based on number of edges
+            edge_alpha = max(0.05, min(0.3, 50000 / H.number_of_edges()))
+
+            # Draw the network with improved aesthetics
+            edges = nx.draw_networkx_edges(
+                H, pos,
+                width=0.2,
+                alpha=edge_alpha,
+                edge_color="lightblue"
+            )
+
+            # Use a colormap based on degree for nodes
+            nodes = nx.draw_networkx_nodes(
+                H, pos,
+                node_size=node_sizes,
+                node_color=[degrees[n] for n in H.nodes()],
+                cmap=plt.cm.viridis,
+                alpha=0.7
+            )
+
+            # Add colorbar for node degree
+            plt.colorbar(nodes, label="Node Degree", shrink=0.6)
+
+            # Add title with graph metrics
+            plt.title(
+                f"Feature Similarity Network (Top 3 Components)\n"
+                f"Nodes: {H.number_of_nodes()} (of {initial_nodes}), "
+                f"Edges: {H.number_of_edges()} (of {initial_edges})\n"
+                f"Avg. Degree: {avg_degree:.2f}, Density: {density:.4f}, "
+                f"Similarity Threshold: {similarity_threshold}",
+                fontsize=14
+            )
+
+        else:
+            # For smaller networks, we can visualize everything
+            # Compute positions - using spring layout with optimized parameters
+            pos = nx.spring_layout(
+                G,
+                k=0.2,  # Optimal distance between nodes
+                iterations=50,  # More iterations for better layout
+                seed=42
+            )
+
+            # Determine node sizes based on degree
+            degrees = dict(G.degree())
+
+            # Scale node size inversely with node count to avoid overcrowding
+            size_scale = max(1, 1000 / np.sqrt(len(G)))
+            node_sizes = [2 + np.sqrt(degrees[n]) * size_scale for n in G.nodes()]
+
+            # Determine edge alpha based on number of edges
+            edge_alpha = max(0.01, min(0.2, 20000 / G.number_of_edges()))
+
+            # Draw the network with improved aesthetics
+            edges = nx.draw_networkx_edges(
+                G, pos,
+                width=0.1,
+                alpha=edge_alpha,
+                edge_color="lightblue"
+            )
+
+            # Use a colormap based on degree for nodes
+            nodes = nx.draw_networkx_nodes(
+                G, pos,
+                node_size=node_sizes,
+                node_color=[degrees[n] for n in G.nodes()],
+                cmap=plt.cm.viridis,
+                alpha=0.7
+            )
+
+            # Add colorbar for node degree
+            plt.colorbar(nodes, label="Node Degree", shrink=0.6)
+
+            # Add title with graph metrics
+            plt.title(
+                f"Feature Similarity Network\n"
+                f"Nodes: {G.number_of_nodes()}, Edges: {G.number_of_edges()}\n"
+                f"Avg. Degree: {avg_degree:.2f}, Density: {density:.4f}, "
+                f"Similarity Threshold: {similarity_threshold}",
+                fontsize=14
+            )
+
+        plt.axis('off')
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+
+        if logger:
+            logger.info(f"Enhanced graph network visualization saved to {save_path}")
+
+        # Create a 2D embedding visualization of the feature space (shows clusters without edges)
+        try:
+            from sklearn.manifold import TSNE
+            from sklearn.decomposition import PCA
+
+            plt.figure(figsize=(14, 12))
+
+            # Step 1: Use PCA to reduce dimensionality to 50D for faster processing
+            if all_features.shape[1] > 50:
+                pca = PCA(n_components=50)
+                reduced_features = pca.fit_transform(all_features[indices])
+            else:
+                reduced_features = all_features[indices]
+
+            # Step 2: Use t-SNE for final 2D embedding
+            tsne = TSNE(n_components=2, perplexity=30, n_iter=1000, random_state=42)
+            embedding = tsne.fit_transform(reduced_features)
+
+            # Step 3: Color points by their connected component
+            colors = []
+            component_map = {}
+
+            # Map each node to its component ID
+            for i, comp in enumerate(components):
+                for node in comp:
+                    component_map[node] = i
+
+            # Get top 15 components by size (for coloring)
+            top_components = sorted(components, key=len, reverse=True)[:15]
+            top_comp_sets = [set(c) for c in top_components]
+
+            # Create a color for each node based on component
+            for i in range(len(embedding)):
+                node_id = i
+
+                # Check if node is in one of the top components
+                assigned = False
+                for j, comp_set in enumerate(top_comp_sets):
+                    if node_id in comp_set:
+                        colors.append(j)
+                        assigned = True
+                        break
+
+                # If not in a top component, assign a default color
+                if not assigned:
+                    colors.append(len(top_comp_sets))
+
+            # Plot the embedding with component-based coloring
+            plt.scatter(
+                embedding[:, 0],
+                embedding[:, 1],
+                c=colors,
+                cmap='tab20',
+                alpha=0.7,
+                s=3  # Small point size to show more points clearly
+            )
+
+            plt.title(f"t-SNE Visualization of Feature Space\nColored by Connected Component")
+            plt.xlabel("t-SNE Dimension 1")
+            plt.ylabel("t-SNE Dimension 2")
+
+            # Save t-SNE visualization
+            tsne_path = os.path.splitext(save_path)[0] + "_tsne.png"
+            plt.tight_layout()
+            plt.savefig(tsne_path, dpi=300)
+            plt.close()
+
+            if logger:
+                logger.info(f"t-SNE visualization saved to {tsne_path}")
+
+        except Exception as e:
+            if logger:
+                logger.error(f"Failed to create t-SNE visualization: {str(e)}")
+
+    except Exception as e:
+        if logger:
+            logger.error(f"Failed to create graph visualization: {str(e)}")
+
 
 class PromptPool:
     def __init__(self, feature_dim, min_community_size=5, similarity_threshold=0.6, community_ratio=1.4, device='cuda'):
@@ -59,7 +348,7 @@ class PromptPool:
         with torch.no_grad():
             for batch_idx, (images, labels, _) in enumerate(tqdm(data_loader, desc="Extracting features")):
                 images = images.to(self.device)
-                features = model[0](images)  # Extract features from backbone
+                features = model.backbone(images)  # Extract features from backbone
                 features = F.normalize(features, dim=1)  # Normalize features
                 all_features.append(features.cpu())
                 all_labels.append(labels)
@@ -73,9 +362,63 @@ class PromptPool:
         logger.info("Computing similarity matrix...")
         similarity_matrix = cosine_similarity(all_features)
 
-        # Create adjacency matrix with threshold
+        # Try different similarity thresholds to find a good balance
+        thresholds = [self.similarity_threshold]
+
+        # Optionally add more thresholds to test
+        if len(all_features) > 1000:
+            additional_thresholds = [
+                self.similarity_threshold - 0.1,  # Lower threshold for more connections
+                self.similarity_threshold + 0.1,  # Higher threshold for fewer connections
+            ]
+            thresholds.extend([t for t in additional_thresholds if 0.3 <= t <= 0.9])
+
+        threshold_results = {}
+        best_threshold = self.similarity_threshold
+        best_components = 0
+
+        for threshold in thresholds:
+            # Create adjacency matrix with current threshold
+            adjacency_matrix = (similarity_matrix > threshold).astype(np.int8)
+            np.fill_diagonal(adjacency_matrix, 0)  # Remove self-loops
+
+            # Create graph and check component structure
+            G = nx.from_numpy_array(adjacency_matrix)
+            components = list(nx.connected_components(G))
+
+            # Store results
+            threshold_results[threshold] = {
+                "num_edges": G.number_of_edges(),
+                "num_components": len(components),
+                "largest_component": max(len(c) for c in components) if components else 0,
+            }
+
+            # Log results
+            logger.info(f"Threshold {threshold:.2f}: "
+                        f"{G.number_of_edges()} edges, "
+                        f"{len(components)} components, "
+                        f"largest component: {max(len(c) for c in components) if components else 0} nodes")
+
+            # Select threshold with most components (balance between too connected and too disconnected)
+            if len(components) > best_components:
+                best_threshold = threshold
+                best_components = len(components)
+
+        # Update to best threshold if different
+        if best_threshold != self.similarity_threshold:
+            logger.info(f"Updating similarity threshold from {self.similarity_threshold} to {best_threshold}")
+            self.similarity_threshold = best_threshold
+
+        # Create final adjacency matrix with selected threshold
         adjacency_matrix = (similarity_matrix > self.similarity_threshold).astype(np.int8)
         np.fill_diagonal(adjacency_matrix, 0)  # Remove self-loops
+
+        # Generate graph visualization before community detection
+        log_dir = os.path.dirname(logger.handlers[0].baseFilename) if hasattr(logger,
+                                                                              'handlers') and logger.handlers else "."
+        vis_path = os.path.join(log_dir, "graph_network_visualization.png")
+        visualize_graph_network(adjacency_matrix, vis_path, max_nodes=5000,
+                                logger=logger, similarity_threshold=self.similarity_threshold)
 
         # Convert to graph for community detection
         logger.info("Converting to graph and detecting communities...")
@@ -162,6 +505,94 @@ class PromptPool:
             # Normalize by community size
             label_distribution[i] /= len(node_indices)
 
+        # Generate community visualization
+        community_vis_path = os.path.join(log_dir, "community_visualization.png")
+        try:
+            # Set seaborn style for better visualization
+            sns.set(style="white", context="paper", palette="viridis", font_scale=1.2)
+
+            # Create a new figure for community visualization
+            plt.figure(figsize=(12, 10))
+
+            # Sort nodes by community for better visualization
+            community_order = []
+            for community_id, nodes in valid_communities.items():
+                community_order.extend(nodes)
+
+            if len(community_order) > 0:
+                # Reorder the adjacency matrix based on communities
+                reordered_adj = adjacency_matrix[community_order, :][:, community_order]
+
+                # Create a visualization with a reasonable size limit
+                max_vis_size = min(2000, len(reordered_adj))
+                if len(reordered_adj) > max_vis_size:
+                    reordered_adj = reordered_adj[:max_vis_size, :max_vis_size]
+
+                # Use seaborn heatmap for better visualization
+                ax = sns.heatmap(
+                    reordered_adj[:max_vis_size, :max_vis_size],
+                    cmap="viridis",
+                    xticklabels=False,
+                    yticklabels=False,
+                    cbar_kws={"label": "Connection"}
+                )
+
+                plt.title("Community Structure in Adjacency Matrix", fontsize=14)
+                plt.xlabel("Node Index (reordered by community)")
+                plt.ylabel("Node Index (reordered by community)")
+
+                # Add annotations for community boundaries
+                current_idx = 0
+                prev_community = None
+                community_boundaries = []
+
+                for node_idx in community_order[:max_vis_size]:
+                    community_id = partition[node_idx]
+                    if community_id != prev_community and prev_community is not None:
+                        community_boundaries.append(current_idx)
+                    prev_community = community_id
+                    current_idx += 1
+
+                # Draw community boundary lines
+                for boundary in community_boundaries:
+                    if boundary < max_vis_size:
+                        plt.axhline(y=boundary, color='r', linestyle='-', alpha=0.3)
+                        plt.axvline(x=boundary, color='r', linestyle='-', alpha=0.3)
+
+                plt.tight_layout()
+                plt.savefig(community_vis_path, dpi=300)
+                plt.close()
+
+                # Generate a summary of community distribution
+                plt.figure(figsize=(10, 8))
+
+                # Create a heatmap of label distribution per community
+                ax = sns.heatmap(
+                    label_distribution,
+                    cmap="YlGnBu",
+                    vmin=0,
+                    vmax=1,
+                    cbar_kws={"label": "Proportion of Class Samples"}
+                )
+
+                plt.title("Class Distribution Across Communities", fontsize=14)
+                plt.xlabel("Class ID")
+                plt.ylabel("Community ID")
+
+                # Save class distribution visualization
+                class_dist_path = os.path.join(log_dir, "community_class_distribution.png")
+                plt.tight_layout()
+                plt.savefig(class_dist_path, dpi=300)
+                plt.close()
+
+                logger.info(f"Community visualization saved to {community_vis_path}")
+                logger.info(f"Class distribution visualization saved to {class_dist_path}")
+            else:
+                logger.warning("No communities to visualize")
+
+        except Exception as e:
+            logger.error(f"Failed to create community visualization: {str(e)}")
+
         return {
             'num_prompts': self.num_prompts,
             'community_info': community_info,
@@ -233,328 +664,3 @@ class PromptPool:
         enhanced_features = F.normalize(enhanced_features, dim=1)
 
         return enhanced_features
-
-    def visualize_prompt_pool(self, output_path, class_labels=None, label_names=None, figsize=(15, 15)):
-        """
-        可视化Prompt Pool中的社区划分情况。
-
-        Args:
-            output_path (str): 输出图像的保存路径
-            class_labels (list, optional): 每个prompt对应的类别标签
-            label_names (dict, optional): 类别ID到类别名称的映射
-            figsize (tuple, optional): 图像大小
-        """
-
-        if self.prompts is None or len(self.prompts) == 0:
-            print("Prompt pool is empty, nothing to visualize.")
-            return
-
-        # 设置颜色映射
-        if class_labels is not None:
-            num_classes = max(class_labels) + 1
-            colors = sns.color_palette("husl", n_colors=num_classes)
-            class_colors = {i: colors[i] for i in range(num_classes)}
-        else:
-            # 基于prompts之间的相似度进行社区检测
-            prompts = self.prompts.cpu().numpy()
-            similarity_matrix = prompts @ prompts.T
-            np.fill_diagonal(similarity_matrix, 0)
-
-            # 创建相似度图
-            threshold = 0.5
-            adjacency_matrix = (similarity_matrix > threshold).astype(np.int8)
-
-            # 使用networkx进行社区检测
-            import networkx as nx
-            import community as community_louvain
-
-            G = nx.from_numpy_array(adjacency_matrix)
-            partition = community_louvain.best_partition(G)
-
-            # 获取社区ID作为类别标签
-            class_labels = [partition[i] for i in range(len(self.prompts))]
-            num_communities = max(class_labels) + 1
-            colors = sns.color_palette("husl", n_colors=num_communities)
-            class_colors = {i: colors[i] for i in range(num_communities)}
-
-        # 使用t-SNE降维以便可视化
-        tsne = TSNE(n_components=2, perplexity=min(30, len(self.prompts) - 1), random_state=42)
-        prompts_2d = tsne.fit_transform(self.prompts.cpu().numpy())
-
-        # 创建图形
-        plt.figure(figsize=figsize)
-
-        # 绘制点
-        for i, (x, y) in enumerate(prompts_2d):
-            label = class_labels[i] if class_labels is not None else 0
-            color = class_colors[label]
-            plt.scatter(x, y, color=color, s=100, alpha=0.7)
-
-            # 如果有标签名称，则显示标签
-            if label_names is not None and label in label_names:
-                plt.annotate(label_names[label], (x, y), fontsize=8,
-                             ha='center', va='center',
-                             bbox=dict(boxstyle='round,pad=0.3', fc='white', alpha=0.7))
-            else:
-                # 显示prompt索引
-                plt.annotate(str(i), (x, y), fontsize=8,
-                             ha='center', va='center',
-                             bbox=dict(boxstyle='round,pad=0.3', fc='white', alpha=0.7))
-
-        # 绘制高相似度连接
-        if similarity_matrix is not None:
-            for i in range(len(prompts_2d)):
-                for j in range(i + 1, len(prompts_2d)):
-                    if similarity_matrix[i, j] > threshold:
-                        plt.plot([prompts_2d[i, 0], prompts_2d[j, 0]],
-                                 [prompts_2d[i, 1], prompts_2d[j, 1]],
-                                 'gray', alpha=0.2)
-
-        # 添加图例
-        if class_labels is not None and label_names is not None:
-            from matplotlib.lines import Line2D
-            legend_elements = [Line2D([0], [0], marker='o', color='w',
-                                      label=label_names[i] if i in label_names else f"Class {i}",
-                                      markerfacecolor=class_colors[i], markersize=10)
-                               for i in sorted(set(class_labels))]
-            plt.legend(handles=legend_elements, loc='best')
-
-        plt.title(f'Prompt Pool Visualization (t-SNE) - {len(self.prompts)} prompts')
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        plt.close()
-
-        print(f"Visualization saved to {output_path}")
-
-        # 额外创建社区网络图
-        plt.figure(figsize=figsize)
-        G = nx.Graph()
-
-        # 添加节点
-        for i in range(len(prompts_2d)):
-            G.add_node(i, pos=(prompts_2d[i, 0], prompts_2d[i, 1]),
-                       community=class_labels[i] if class_labels is not None else 0)
-
-        # 添加边
-        if similarity_matrix is not None:
-            for i in range(len(prompts_2d)):
-                for j in range(i + 1, len(prompts_2d)):
-                    if similarity_matrix[i, j] > threshold:
-                        G.add_edge(i, j, weight=similarity_matrix[i, j])
-
-        # 获取布局
-        pos = nx.get_node_attributes(G, 'pos')
-
-        # 按社区给节点着色
-        community_colors = [class_colors[G.nodes[n]['community']] for n in G.nodes]
-
-        # 绘制图
-        nx.draw(G, pos, node_color=community_colors, with_labels=True, node_size=100,
-                font_size=8, font_color='black', alpha=0.7, width=0.5, edge_color='gray')
-
-        plt.title(f'Prompt Pool Network - {len(self.prompts)} prompts')
-        plt.tight_layout()
-        plt.savefig(output_path.replace('.png', '_network.png'), dpi=300, bbox_inches='tight')
-        plt.close()
-
-        print(f"Network visualization saved to {output_path.replace('.png', '_network.png')}")
-
-    def update_prompt_pool_incrementally(self, model, data_loader, similarity_threshold=0.8, ema_alpha=0.9,
-                                         logger=None):
-        """
-        以增量方式更新prompt pool:
-        1. 对于与现有prompts相似的样本，使用EMA更新对应的prompt
-        2. 对于不与任何现有prompt相似的样本，收集起来进行社区发现，生成新的prompts
-
-        Args:
-            model: 当前训练好的模型 (PromptEnhancedModel)
-            data_loader: 当前session的数据加载器
-            similarity_threshold: 判断样本是否属于已知类的相似度阈值
-            ema_alpha: EMA更新的动量系数
-            logger: 日志记录器
-
-        Returns:
-            更新统计信息
-        """
-        if logger:
-            logger.info("Starting incremental prompt pool update...")
-
-        model.eval()
-
-        # 1. 提取当前session所有样本的特征
-        all_features = []
-
-        with torch.no_grad():
-            for batch_idx, batch in enumerate(tqdm(data_loader, desc="Extracting features")):
-                # 适应不同的数据加载器格式
-                if len(batch) == 2:
-                    images, _ = batch
-                elif len(batch) >= 3:
-                    images = batch[0]
-
-                images = images.to(self.device)
-                features = model.backbone(images)
-                features = F.normalize(features, dim=1)
-                all_features.append(features.cpu())
-
-        all_features = torch.cat(all_features, dim=0)
-        if logger:
-            logger.info(f"Extracted features from {len(all_features)} samples")
-
-        # 2. 计算样本特征与现有prompts的相似度
-        prompts = F.normalize(self.prompts, dim=1)
-        similarities = all_features @ prompts.cpu().T  # [N_samples, N_prompts]
-
-        # 3. 对每个样本，找到最相似的prompt
-        max_similarities, most_similar_prompt_idxs = torch.max(similarities, dim=1)
-
-        # 4. 分离属于已知类和新类的样本
-        known_class_mask = max_similarities >= similarity_threshold
-        unknown_class_mask = ~known_class_mask
-
-        known_features = all_features[known_class_mask]
-        known_prompt_idxs = most_similar_prompt_idxs[known_class_mask]
-        unknown_features = all_features[unknown_class_mask]
-
-        if logger:
-            logger.info(f"Identified {known_features.shape[0]} samples from known classes")
-            logger.info(f"Identified {unknown_features.shape[0]} samples from potentially new classes")
-
-        # 5. 使用EMA更新已知类的prompts
-        updated_prompt_count = 0
-        prompt_updates = {}
-
-        for prompt_idx in torch.unique(known_prompt_idxs):
-            prompt_idx = prompt_idx.item()
-            prompt_features = known_features[known_prompt_idxs == prompt_idx]
-            if len(prompt_features) > 0:
-                # 计算属于该prompt的样本的平均特征
-                avg_feature = torch.mean(prompt_features, dim=0)
-                avg_feature = F.normalize(avg_feature, dim=0)
-
-                # 使用EMA更新prompt
-                old_prompt = self.prompts[prompt_idx].cpu()
-                updated_prompt = ema_alpha * old_prompt + (1 - ema_alpha) * avg_feature
-                updated_prompt = F.normalize(updated_prompt, dim=0)
-
-                # 更新prompt
-                self.prompts[prompt_idx] = updated_prompt.to(self.device)
-                updated_prompt_count += 1
-
-                prompt_updates[prompt_idx] = {
-                    'num_samples': len(prompt_features),
-                    'avg_similarity': max_similarities[known_prompt_idxs == prompt_idx].mean().item(),
-                    'similarity_std': max_similarities[known_prompt_idxs == prompt_idx].std().item()
-                }
-
-        if logger:
-            logger.info(f"Updated {updated_prompt_count} existing prompts using EMA")
-
-        # 6. 对新类样本进行社区发现
-        new_prompts = []
-        detected_communities = 0
-
-        if len(unknown_features) > 0:
-            # 转换为numpy以使用社区检测算法
-            unknown_features_np = unknown_features.numpy()
-
-            # 计算相似度矩阵
-            unknown_similarity_matrix = unknown_features @ unknown_features.T
-            unknown_similarity_matrix = unknown_similarity_matrix.numpy()
-
-            # 创建邻接矩阵
-            adjacency_threshold = max(similarity_threshold * 0.9, 0.5)  # 略低于样本-prompt的阈值，但不低于0.5
-            adjacency_matrix = (unknown_similarity_matrix > adjacency_threshold).astype(np.int8)
-            np.fill_diagonal(adjacency_matrix, 0)  # 移除自环
-
-            # 使用networkx和社区检测算法
-            import networkx as nx
-            import community as community_louvain
-
-            # 创建图
-            G = nx.from_numpy_array(adjacency_matrix)
-
-            # 社区检测
-            partition = community_louvain.best_partition(G)
-
-            # 收集社区
-            communities = {}
-            for node, community_id in partition.items():
-                if community_id not in communities:
-                    communities[community_id] = []
-                communities[community_id].append(node)
-
-            # 过滤太小的社区
-            min_community_size = max(self.min_community_size, 3)  # 至少3个样本
-            valid_communities = {k: v for k, v in communities.items() if len(v) >= min_community_size}
-            detected_communities = len(valid_communities)
-
-            if logger:
-                logger.info(f"Detected {detected_communities} valid communities from new class samples")
-
-            # 7. 从每个有效社区创建新的prompts
-            community_stats = []
-
-            for community_id, node_indices in valid_communities.items():
-                community_features = unknown_features[node_indices]
-                community_prompt = torch.mean(community_features, dim=0)
-                community_prompt = F.normalize(community_prompt, dim=0)
-                new_prompts.append(community_prompt)
-
-                # 计算社区内样本的平均相似度
-                community_sim_matrix = community_features @ community_features.T
-                community_sim = (community_sim_matrix.sum() - len(node_indices)) / (
-                            len(node_indices) * (len(node_indices) - 1))
-
-                community_stats.append({
-                    'size': len(node_indices),
-                    'avg_internal_similarity': community_sim.item()
-                })
-
-        # 8. 将新prompts添加到现有prompts中
-        if new_prompts:
-            new_prompts_tensor = torch.stack(new_prompts)
-
-            # 在添加前检查新prompts与现有prompts的相似度
-            # 避免添加与现有prompts太相似的新prompts
-            existing_prompts = F.normalize(self.prompts, dim=1)
-            new_prompts_normalized = F.normalize(new_prompts_tensor, dim=1)
-
-            cross_similarities = new_prompts_normalized @ existing_prompts.cpu().T
-            max_cross_similarities, _ = torch.max(cross_similarities, dim=1)
-
-            # 只添加与现有prompts相似度较低的新prompts
-            unique_threshold = similarity_threshold * 0.95  # 略低于判定阈值
-            unique_mask = max_cross_similarities < unique_threshold
-
-            unique_new_prompts = new_prompts_tensor[unique_mask]
-
-            if len(unique_new_prompts) > 0:
-                self.prompts = torch.cat([self.prompts, unique_new_prompts.to(self.device)], dim=0)
-
-                if logger:
-                    logger.info(f"Added {len(unique_new_prompts)} new prompts to the prompt pool")
-                    if len(unique_new_prompts) < len(new_prompts):
-                        logger.info(f"Filtered out {len(new_prompts) - len(unique_new_prompts)} redundant prompts")
-            else:
-                if logger:
-                    logger.info(f"All {len(new_prompts)} new prompts were too similar to existing ones, none added")
-
-        # 9. 更新prompts池的大小信息
-        self.num_prompts = len(self.prompts)
-
-        # 10. 返回更新统计信息
-        update_stats = {
-            'num_samples': len(all_features),
-            'num_known_samples': known_features.shape[0],
-            'num_unknown_samples': unknown_features.shape[0],
-            'num_updated_prompts': updated_prompt_count,
-            'prompt_updates': prompt_updates,
-            'detected_communities': detected_communities,
-            'num_new_prompts_before_filtering': len(new_prompts) if new_prompts else 0,
-            'num_new_prompts_added': len(unique_new_prompts) if 'unique_new_prompts' in locals() else 0,
-            'community_stats': community_stats if 'community_stats' in locals() else [],
-            'total_prompts_after_update': len(self.prompts)
-        }
-
-        return update_stats

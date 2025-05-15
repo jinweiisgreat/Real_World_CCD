@@ -540,7 +540,7 @@ if __name__ == "__main__":
     parser.add_argument('--warmup_teacher_temp', default=0.07, type=float, help='Initial value for the teacher temperature.')
     parser.add_argument('--teacher_temp', default=0.04, type=float, help='Final value (after linear warmup) of the teacher temperature.')
     #parser.add_argument('--teacher_temp_final', default=0.05, type=float, help='Final value (online session) of the teacher temperature.')
-    parser.add_argument('--warmup_teacher_temp_epochs', default=30, type=int, help='Number of warmup epochs for the teacher temperature.')
+    parser.add_argument('--warmup_teacher_temp_epochs', default=5, type=int, help='Number of warmup epochs for the teacher temperature. default = 30')
 
     '''clustering-guided initialization'''
     parser.add_argument('--init_new_head', action='store_true', default=False)
