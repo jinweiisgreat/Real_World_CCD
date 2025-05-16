@@ -527,6 +527,7 @@ class PromptPool:
 
         # 9. 更新prompts池的大小信息
         self.num_prompts = len(self.prompts)
+        logger.info(f"total prompts after update: {self.num_prompts}")
 
         # 10. 返回更新统计信息
         update_stats = {

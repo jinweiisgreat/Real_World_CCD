@@ -239,11 +239,20 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
 
     # 加载prompt pool
     if hasattr(args, 'prompt_pool') and args.prompt_pool is not None:
-        offline_model_dir = os.path.join(exp_root + '_offline', args.dataset_name, args.load_offline_id, 'checkpoints')
-        prompt_pool_path = os.path.join(offline_model_dir, 'prompt_pool.pt')
+        # 根据当前会话选择正确的 Prompt Pool 加载路径
+        if current_session == 1:
+            # 第一个会话使用离线阶段的 Prompt Pool
+            offline_model_dir = os.path.join(exp_root + '_offline', args.dataset_name, args.load_offline_id,
+                                             'checkpoints')
+            prompt_pool_path = os.path.join(offline_model_dir, 'prompt_pool.pt')
+        else:
+            # 后续会话使用上一个会话更新后的 Prompt Pool
+            prompt_pool_path = os.path.join(args.model_dir, f'prompt_pool_session_{current_session-1}.pt')
+
         if os.path.exists(prompt_pool_path):
             args.logger.info(f"Loading prompt pool from {prompt_pool_path}")
             args.prompt_pool.load_prompt_pool(prompt_pool_path, device=args.device)
+            args.logger.info(f"Loaded Prompt Pool with {args.prompt_pool.num_prompts} prompts")
         else:
             args.logger.warning(f"Prompt pool not found at {prompt_pool_path}")
 
@@ -476,6 +485,7 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
         update_stats_path = os.path.join(args.model_dir, f'prompt_pool_update_stats_session_{current_session}.pt')
         torch.save(update_stats, update_stats_path)
         args.logger.info(f"Update statistics saved to {update_stats_path}")
+        args.logger.info(f"Session {current_session} ends with {args.prompt_pool.num_prompts} prompts in pool")
 
         adjacency_matrix = update_stats['adjacency_matrix']
         graph_vis_path = os.path.join(args.model_dir, f'prompt_network_session_{current_session}.png')
