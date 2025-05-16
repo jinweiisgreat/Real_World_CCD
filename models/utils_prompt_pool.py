@@ -6,6 +6,10 @@ Author: Wei Jin
 update: 添加prompt pool update 机制
 Date: 2025/05/15
 Author: Wei Jin
+
+update: Prompt pool Visualization
+Date: 2025/05/16
+Author: Wei Jin
 """
 import torch
 import torch.nn as nn
