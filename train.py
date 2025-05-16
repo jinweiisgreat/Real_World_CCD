@@ -2,6 +2,10 @@
 Modify：添加 Prompt Pool 类
 date:   2025/05/12
 author: Wei Jin
+
+update: prompt pool update
+date:   2025/05/16
+author: Wei Jin
 """
 
 import argparse
@@ -233,7 +237,7 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
     assert isinstance(student, PromptEnhancedModel), f"Expected PromptEnhancedModel but got {type(student)}"
     assert isinstance(student_pre, PromptEnhancedModel), f"Expected PromptEnhancedModel but got {type(student_pre)}"
 
-    # 尝试加载prompt pool
+    # 加载prompt pool
     if hasattr(args, 'prompt_pool') and args.prompt_pool is not None:
         offline_model_dir = os.path.join(exp_root + '_offline', args.dataset_name, args.load_offline_id, 'checkpoints')
         prompt_pool_path = os.path.join(offline_model_dir, 'prompt_pool.pt')
@@ -408,6 +412,75 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
     args.best_test_acc_soft_all_list.append(best_test_acc_soft_all)
     args.best_test_acc_seen_list.append(best_test_acc_seen)
     args.best_test_acc_unseen_list.append(best_test_acc_unseen)
+
+    # -------------------------------
+    # Update prompt pool
+    # -------------------------------
+    if hasattr(args, 'prompt_pool') and args.prompt_pool is not None:
+        args.logger.info(f"Incrementally updating prompt pool after session {current_session}...")
+
+        # 准备用于更新的数据集（使用干净的transform）
+        clean_dataset = deepcopy(train_loader.dataset)
+        clean_dataset.transform = test_transform
+        clean_loader = DataLoader(
+            clean_dataset,
+            num_workers=args.num_workers_test,
+            batch_size=256,
+            shuffle=False,
+            pin_memory=False
+        )
+
+        # 获取当前会话的最佳模型
+        best_model_path = args.model_path[:-3] + '_session-' + str(current_session) + f'_best.pt'
+        best_model = None
+
+        if os.path.exists(best_model_path):
+            try:
+                state_dict = torch.load(best_model_path)['model']
+                # 创建一个临时的增强模型用于特征提取
+                temp_enhanced_model = PromptEnhancedModel(
+                    backbone=deepcopy(backbone),
+                    projector=deepcopy(projector_cur),
+                    prompt_pool=args.prompt_pool,
+                    top_k=5
+                )
+                temp_enhanced_model.load_state_dict(state_dict)
+                temp_enhanced_model = temp_enhanced_model.to(device)
+                best_model = temp_enhanced_model
+                args.logger.info(f"Loaded best model for prompt pool update from {best_model_path}")
+            except Exception as e:
+                args.logger.warning(f"Failed to load best model: {e}")
+                best_model = enhanced_student
+        else:
+            args.logger.info("Using current model for prompt pool update")
+            best_model = enhanced_student
+
+        # 增量更新prompt pool
+        similarity_threshold = getattr(args, 'prompt_update_threshold', 0.8)
+        ema_alpha = getattr(args, 'prompt_ema_alpha', 0.9)
+
+        update_stats = args.prompt_pool.update_prompt_pool_incrementally(
+            model=best_model,
+            data_loader=clean_loader,
+            similarity_threshold=similarity_threshold,
+            ema_alpha=ema_alpha,
+            logger=args.logger
+        )
+
+        # 保存更新后的prompt pool
+        prompt_pool_path = os.path.join(args.model_dir, f'prompt_pool_session_{current_session}.pt')
+        args.prompt_pool.save_prompt_pool(prompt_pool_path)
+        args.logger.info(f"Updated prompt pool saved to {prompt_pool_path}")
+
+        # 记录prompt pool更新统计信息
+        update_stats_path = os.path.join(args.model_dir, f'prompt_pool_update_stats_session_{current_session}.pt')
+        torch.save(update_stats, update_stats_path)
+        args.logger.info(f"Update statistics saved to {update_stats_path}")
+
+        adjacency_matrix = update_stats['adjacency_matrix']
+        graph_vis_path = os.path.join(args.model_dir, f'prompt_network_session_{current_session}.png')
+        visualize_graph_network(adjacency_matrix, graph_vis_path, max_nodes=5000, logger=args.logger)
+        args.logger.info(f"Prompt network visualization saved to {graph_vis_path}")
 
 
 def test_online(model, test_loader, epoch, save_name, args):

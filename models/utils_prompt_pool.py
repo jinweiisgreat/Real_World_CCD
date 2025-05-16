@@ -296,6 +296,255 @@ class PromptPool:
             'adjacency_matrix': adjacency_matrix
         }
 
+    def update_prompt_pool_incrementally(self, model, data_loader, similarity_threshold=0.8, ema_alpha=0.9,
+                                         logger=None):
+        """
+        以增量方式更新prompt pool:
+        1. 对于与现有prompts相似的样本，使用EMA更新对应的prompt
+        2. 对于不与任何现有prompt相似的样本，收集起来进行社区发现，生成新的prompts
+
+        Args:
+            model: 当前训练好的模型 (PromptEnhancedModel)
+            data_loader: 当前session的数据加载器
+            similarity_threshold: 判断样本是否属于已知类的相似度阈值
+            ema_alpha: EMA更新的动量系数
+            logger: 日志记录器
+
+        Returns:
+            更新统计信息
+        """
+        if logger:
+            logger.info("Starting incremental prompt pool update...")
+
+        model.eval()
+
+        # 1. 提取当前session所有样本的特征
+        all_features = []
+
+        sample_count = 0
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(tqdm(data_loader, desc="Extracting features")):
+                try:
+                    # 处理不同格式的数据加载器返回的批次
+                    if len(batch) >= 3:  # 至少包含图像、标签和唯一索引
+                        if isinstance(batch[0], list):  # 如果images是一个list (对比学习中常见)
+                            # 对比学习中，每个样本有多个视图，我们只取第一个视图
+                            images = batch[0][0].to(self.device)  # 第一个视图
+                            sample_count += len(images)
+                        else:
+                            # 常规单视图情况
+                            images = batch[0].to(self.device)
+                            sample_count += len(images)
+                    else:
+                        if logger:
+                            logger.warning(f"Unexpected batch format at index {batch_idx}")
+                        continue
+
+                    # 从backbone提取特征
+                    features = model.backbone(images)
+                    features = F.normalize(features, dim=1)
+
+                    all_features.append(features.cpu())
+                except Exception as e:
+                    if logger:
+                        logger.error(f"Error processing batch {batch_idx}: {str(e)}")
+                    continue
+
+        if not all_features:
+            if logger:
+                logger.error("No features extracted. Cannot update prompt pool.")
+            return {"error": "No features extracted"}
+
+        all_features = torch.cat(all_features, dim=0)
+        if logger:
+            logger.info(f"Extracted features from {len(all_features)} samples (processed {sample_count} images)")
+
+        # 确保提取的特征数量与处理的样本数量一致
+        if len(all_features) != sample_count:
+            if logger:
+                logger.warning(f"Feature count ({len(all_features)}) doesn't match sample count ({sample_count})")
+
+        # 2. 计算样本特征与现有prompts的相似度
+        prompts = F.normalize(self.prompts, dim=1)
+        similarities = all_features @ prompts.cpu().T  # [N_samples, N_prompts]
+
+        # 3. 对每个样本，找到最相似的prompt
+        max_similarities, most_similar_prompt_idxs = torch.max(similarities, dim=1)
+
+        # 4. 分离属于已知类和新类的样本
+        known_class_mask = max_similarities >= similarity_threshold
+        unknown_class_mask = ~known_class_mask
+
+        known_features = all_features[known_class_mask]
+        known_prompt_idxs = most_similar_prompt_idxs[known_class_mask]
+        unknown_features = all_features[unknown_class_mask]
+
+        if logger:
+            logger.info(f"Identified {known_features.shape[0]} samples from known classes")
+            logger.info(f"Identified {unknown_features.shape[0]} samples from potentially new classes")
+
+        # 5. 使用EMA更新已知类的prompts
+        updated_prompt_count = 0
+        prompt_updates = {}
+
+        for prompt_idx in torch.unique(known_prompt_idxs):
+            prompt_idx = prompt_idx.item()
+            prompt_features = known_features[known_prompt_idxs == prompt_idx]
+            if len(prompt_features) > 0:
+                # 计算属于该prompt的样本的平均特征
+                avg_feature = torch.mean(prompt_features, dim=0)
+                avg_feature = F.normalize(avg_feature, dim=0)
+
+                # 使用EMA更新prompt
+                old_prompt = self.prompts[prompt_idx].cpu()
+                updated_prompt = ema_alpha * old_prompt + (1 - ema_alpha) * avg_feature
+                updated_prompt = F.normalize(updated_prompt, dim=0)
+
+                # 更新prompt
+                self.prompts[prompt_idx] = updated_prompt.to(self.device)
+                updated_prompt_count += 1
+
+                # 获取属于该prompt的样本的相似度
+                prompt_similarities = max_similarities[known_class_mask][known_prompt_idxs == prompt_idx]
+
+                prompt_updates[prompt_idx] = {
+                    'num_samples': len(prompt_features),
+                    'avg_similarity': prompt_similarities.mean().item(),
+                    'similarity_std': prompt_similarities.std().item() if len(prompt_similarities) > 1 else 0.0
+                }
+
+        if logger:
+            logger.info(f"Updated {updated_prompt_count} existing prompts using EMA")
+
+        # 6. 对新类样本进行社区发现
+        new_prompts = []
+        detected_communities = 0
+        community_stats = []
+
+        if len(unknown_features) > 0:
+            try:
+                # 转换为numpy以使用社区检测算法
+                unknown_features_np = unknown_features.numpy()
+
+                # 计算相似度矩阵
+                unknown_similarity_matrix = unknown_features @ unknown_features.T
+                unknown_similarity_matrix = unknown_similarity_matrix.numpy()
+
+                # 创建邻接矩阵
+                adjacency_threshold = max(similarity_threshold * 0.9, 0.5)  # 略低于样本-prompt的阈值，但不低于0.5
+                adjacency_matrix = (unknown_similarity_matrix > adjacency_threshold).astype(np.int8)
+                np.fill_diagonal(adjacency_matrix, 0)  # 移除自环
+
+                # 使用networkx和社区检测算法
+                import networkx as nx
+                import community as community_louvain
+
+                # 创建图
+                G = nx.from_numpy_array(adjacency_matrix)
+
+                if G.number_of_nodes() > 0:
+                    # 社区检测
+                    partition = community_louvain.best_partition(G)
+
+                    # 收集社区
+                    communities = {}
+                    for node, community_id in partition.items():
+                        if community_id not in communities:
+                            communities[community_id] = []
+                        communities[community_id].append(node)
+
+                    # 过滤太小的社区
+                    min_community_size = max(self.min_community_size, 3)  # 至少3个样本
+                    valid_communities = {k: v for k, v in communities.items() if len(v) >= min_community_size}
+                    detected_communities = len(valid_communities)
+
+                    if logger:
+                        logger.info(f"Detected {detected_communities} valid communities from new class samples")
+
+                    # 7. 从每个有效社区创建新的prompts
+                    for community_id, node_indices in valid_communities.items():
+                        community_features = unknown_features[node_indices]
+                        community_prompt = torch.mean(community_features, dim=0)
+                        community_prompt = F.normalize(community_prompt, dim=0)
+                        new_prompts.append(community_prompt)
+
+                        # 计算社区内样本的平均相似度
+                        community_sim_matrix = community_features @ community_features.T
+                        community_sim = (community_sim_matrix.sum() - len(node_indices)) / max(
+                            len(node_indices) * (len(node_indices) - 1), 1)  # 避免除零
+
+                        community_stats.append({
+                            'size': len(node_indices),
+                            'avg_internal_similarity': community_sim.item()
+                        })
+                else:
+                    if logger:
+                        logger.warning("No nodes in graph for community detection")
+            except Exception as e:
+                if logger:
+                    logger.error(f"Error during community detection: {str(e)}")
+                import traceback
+                if logger:
+                    logger.error(traceback.format_exc())
+
+        # 8. 将新prompts添加到现有prompts中
+        num_new_prompts_added = 0
+        if new_prompts:
+            try:
+                new_prompts_tensor = torch.stack(new_prompts)
+
+                # 在添加前检查新prompts与现有prompts的相似度
+                # 避免添加与现有prompts太相似的新prompts
+                existing_prompts = F.normalize(self.prompts, dim=1)
+                new_prompts_normalized = F.normalize(new_prompts_tensor, dim=1)
+
+                cross_similarities = new_prompts_normalized @ existing_prompts.cpu().T
+                max_cross_similarities, _ = torch.max(cross_similarities, dim=1)
+
+                # 只添加与现有prompts相似度较低的新prompts
+                unique_threshold = similarity_threshold * 0.95  # 略低于判定阈值
+                unique_mask = max_cross_similarities < unique_threshold
+
+                unique_new_prompts = new_prompts_tensor[unique_mask]
+                num_new_prompts_added = len(unique_new_prompts)
+
+                if num_new_prompts_added > 0:
+                    self.prompts = torch.cat([self.prompts, unique_new_prompts.to(self.device)], dim=0)
+
+                    if logger:
+                        logger.info(f"Added {num_new_prompts_added} new prompts to the prompt pool")
+                        if num_new_prompts_added < len(new_prompts):
+                            logger.info(f"Filtered out {len(new_prompts) - num_new_prompts_added} redundant prompts")
+                else:
+                    if logger:
+                        logger.info(f"All {len(new_prompts)} new prompts were too similar to existing ones, none added")
+            except Exception as e:
+                if logger:
+                    logger.error(f"Error adding new prompts: {str(e)}")
+                import traceback
+                if logger:
+                    logger.error(traceback.format_exc())
+
+        # 9. 更新prompts池的大小信息
+        self.num_prompts = len(self.prompts)
+
+        # 10. 返回更新统计信息
+        update_stats = {
+            'num_samples': len(all_features),
+            'num_known_samples': known_features.shape[0],
+            'num_unknown_samples': unknown_features.shape[0],
+            'num_updated_prompts': updated_prompt_count,
+            'prompt_updates': prompt_updates,
+            'detected_communities': detected_communities,
+            'num_new_prompts_before_filtering': len(new_prompts) if new_prompts else 0,
+            'num_new_prompts_added': num_new_prompts_added,
+            'community_stats': community_stats,
+            'total_prompts_after_update': len(self.prompts),
+            'adjacency_matrix': adjacency_matrix
+        }
+
+        return update_stats
+
     def save_prompt_pool(self, save_path):
         """Save prompt pool to disk"""
         prompt_pool_dict = {
