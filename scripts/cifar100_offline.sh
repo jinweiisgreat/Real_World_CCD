@@ -14,7 +14,7 @@ CUDA_VISIBLE_DEVICES=0 python train.py \
     --num_old_classes 50 \
     --prop_train_labels 0.8 \
     --train_session offline \
-    --epochs_offline 6 \
+    --epochs_offline 100 \
     --continual_session_num 5 \
     --online_novel_unseen_num 400 \
     --online_old_seen_num 25 \
