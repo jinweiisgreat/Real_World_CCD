@@ -32,6 +32,7 @@ from collections import Counter
 # import PromptPool
 from models.utils_prompt_pool import PromptPool
 from models.prompt_enhanced_model import PromptEnhancedModel
+from models.utils_prompt_pool import visualize_graph_network
 
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -179,6 +180,12 @@ def train_offline(student, train_loader, test_loader, args):
         prompt_pool_stats_path = os.path.join(args.model_dir, 'prompt_pool_stats.pt')
         torch.save(prompt_pool_stats, prompt_pool_stats_path)
         args.logger.info(f"Prompt pool statistics saved to {prompt_pool_stats_path}")
+
+        # Visualization
+        adjacency_matrix = prompt_pool_stats['adjacency_matrix']
+        graph_vis_path = os.path.join(args.model_dir, 'graph_network_visualization.png')
+        visualize_graph_network(adjacency_matrix, graph_vis_path, max_nodes=5000, logger=args.logger)
+        args.logger.info(f"Graph network visualization saved to {graph_vis_path}")
 
     return best_test_acc_old
 

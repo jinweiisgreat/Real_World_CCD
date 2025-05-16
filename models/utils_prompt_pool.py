@@ -17,7 +17,118 @@ import community as community_louvain
 import networkx as nx
 from sklearn.metrics.pairwise import cosine_similarity
 import matplotlib.pyplot as plt
+import os
+import seaborn as sns
 
+
+def visualize_graph_network(adjacency_matrix, save_path, max_nodes=5000, logger=None):
+    """
+    简化版的图网络可视化函数，只显示主网络图。
+
+    Args:
+        adjacency_matrix: 图的邻接矩阵
+        save_path: 保存可视化图的路径
+        max_nodes: 可视化的最大节点数
+        logger: 日志记录器
+    """
+    try:
+        import networkx as nx
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+
+        if logger:
+            logger.info(f"Create Graph，show max {max_nodes} nodes...")
+
+        # 设置seaborn样式提高美观度
+        sns.set(style="whitegrid", context="paper", font_scale=1.2)
+
+        # 如果图太大，采样节点
+        n = adjacency_matrix.shape[0]
+        if n > max_nodes:
+            indices = np.random.choice(n, max_nodes, replace=False)
+            sampled_adj_matrix = adjacency_matrix[indices][:, indices]
+            if logger:
+                logger.info(f"From {n} nodes to samping {max_nodes} nodes for visualization...")
+        else:
+            sampled_adj_matrix = adjacency_matrix
+            indices = np.arange(n)
+            if logger:
+                logger.info(f"Using all {n} nodes for visualization...")
+
+        # 从邻接矩阵创建图
+        G = nx.from_numpy_array(sampled_adj_matrix)
+
+        # 计算图统计信息
+        if G.number_of_nodes() > 0:
+            avg_degree = sum(dict(G.degree()).values()) / G.number_of_nodes()
+            density = nx.density(G)
+        else:
+            avg_degree = 0
+            density = 0
+            if logger:
+                logger.warning("There are no nodes in graph.")
+            return
+
+        # 设置主网络可视化
+        plt.figure(figsize=(18, 16))
+
+        # 计算节点位置 - 使用spring布局获得更好的分布
+        pos = nx.spring_layout(
+            G,
+            k=0.15,  # 节点之间的最佳距离（越小越紧凑）
+            iterations=50,  # 更多迭代次数以获得更好的布局
+            seed=42
+        )
+
+        # 根据度确定节点大小
+        degrees = dict(G.degree())
+
+        # 根据节点数量自动缩放节点大小，避免过度拥挤
+        size_scale = max(1, 2000 / np.sqrt(len(G)))
+        node_sizes = [1 + 0.8 * np.sqrt(degrees[n]) * size_scale for n in G.nodes()]
+
+        # 根据边数自动调整透明度
+        edge_alpha = max(0.05, min(0.2, 20000 / G.number_of_edges()))
+
+        # 绘制边
+        edges = nx.draw_networkx_edges(
+            G, pos,
+            width=1.0,
+            alpha=edge_alpha,
+            edge_color="gray"
+        )
+
+        # 使用基于度的颜色映射绘制节点
+        nodes = nx.draw_networkx_nodes(
+            G, pos,
+            node_size=node_sizes,
+            node_color=[degrees[n] for n in G.nodes()],
+            cmap=plt.cm.viridis,
+            alpha=0.7
+        )
+
+        # 添加颜色条显示节点度
+        plt.colorbar(nodes, label="nodes degree", shrink=0.6)
+
+        # 添加标题和图统计信息
+        plt.title(
+            f"Similarity Network\n"
+            f"Node: {G.number_of_nodes()}, Edge: {G.number_of_edges()}\n"
+            f"Avg degree: {avg_degree:.2f}, density: {density:.4f}",
+            fontsize=14
+        )
+
+        plt.axis('off')
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+
+        if logger:
+            logger.info(f"Save to {save_path}")
+
+    except Exception as e:
+        if logger:
+            logger.error(f"Create picture failed: {str(e)}")
 
 class PromptPool:
     def __init__(self, feature_dim, min_community_size=5, similarity_threshold=0.6, community_ratio=1.4, device='cuda'):
@@ -74,8 +185,15 @@ class PromptPool:
         similarity_matrix = cosine_similarity(all_features)
 
         # Create adjacency matrix with threshold
+        logger.info(f"Creating adjacency matrix with threshold {self.similarity_threshold}...")
         adjacency_matrix = (similarity_matrix > self.similarity_threshold).astype(np.int8)
         np.fill_diagonal(adjacency_matrix, 0)  # Remove self-loops
+
+        # Drawing
+        # log_dir = os.path.dirname(logger.handlers[0].baseFilename) if hasattr(logger,
+        #                                                                       'handlers') and logger.handlers else "."
+        # vis_path = os.path.join(log_dir, "graph_network_visualization.png")
+        # visualize_graph_network(adjacency_matrix, vis_path, max_nodes=5000, logger=logger)
 
         # Convert to graph for community detection
         logger.info("Converting to graph and detecting communities...")
@@ -153,6 +271,10 @@ class PromptPool:
         # Log community statistics
         logger.info(f"Created prompt pool with {self.num_prompts} prompts")
 
+        purities = [info['purity'] for info in community_info]
+        avg_purity = sum(purities) / len(purities) if purities else 0
+        logger.info(f"Community avage purity: {avg_purity:.4f}")
+
         # Create a visualization of community label distribution
         label_distribution = np.zeros((self.num_prompts, num_classes))
         for i, (community_id, node_indices) in enumerate(list(valid_communities.items())[:self.num_prompts]):
@@ -165,7 +287,9 @@ class PromptPool:
         return {
             'num_prompts': self.num_prompts,
             'community_info': community_info,
-            'label_distribution': label_distribution
+            'label_distribution': label_distribution,
+            'Communities avg purity': avg_purity,
+            'adjacency_matrix': adjacency_matrix
         }
 
     def save_prompt_pool(self, save_path):
