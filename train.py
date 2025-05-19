@@ -492,7 +492,7 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
         visualize_graph_network(adjacency_matrix, graph_vis_path, max_nodes=5000, logger=args.logger)
         args.logger.info(f"Prompt network visualization saved to {graph_vis_path}")
 
-
+'''
 def test_online(model, test_loader, epoch, save_name, args):
     """
     Online testing function for PromptEnhancedModel.
@@ -592,7 +592,189 @@ def test_online(model, test_loader, epoch, save_name, args):
     args.logger.info(f"Soft metrics: All={all_acc_soft:.4f}, Seen={seen_acc:.4f}, Unseen={unseen_acc:.4f}")
 
     return all_acc, old_acc, new_acc, all_acc_soft, seen_acc, unseen_acc
+'''
 
+
+def test_online(model, test_loader, epoch, save_name, args):
+    """
+    Online testing function for PromptEnhancedModel.
+    """
+    # 确认使用的是PromptEnhancedModel
+    assert isinstance(model, PromptEnhancedModel), f"Expected PromptEnhancedModel but got {type(model)}"
+
+    model.eval()
+
+    preds, targets = [], []
+    mask_hard = np.array([])
+    mask_soft = np.array([])
+
+    # prediction_distribution
+    num_classes = args.num_labeled_classes + args.num_unlabeled_classes
+    class_prediction_counts = np.zeros(num_classes)
+
+    for batch_idx, batch in enumerate(tqdm(test_loader, desc="Evaluating")):
+        # 处理不同格式的数据加载器
+        if len(batch) == 2:
+            images, label = batch
+        elif len(batch) >= 3:
+            images, label, _ = batch[:3]
+
+        images = images.cuda(non_blocking=True)
+
+        with torch.no_grad():
+            # 直接使用PromptEnhancedModel的forward方法
+            _, logits = model(images)
+
+            batch_preds = logits.argmax(1).cpu().numpy()
+            preds.append(batch_preds)
+            targets.append(label.cpu().numpy())
+
+            # 更新预测计数
+            for pred in batch_preds:
+                class_prediction_counts[pred] += 1
+
+            # 创建不同评估指标的掩码
+            mask_hard = np.append(mask_hard, np.array([True if x.item() in range(len(args.train_classes))
+                                                       else False for x in label]))
+            mask_soft = np.append(mask_soft, np.array([True if x.item() in range(args.num_seen_classes)
+                                                       else False for x in label]))
+
+    preds = np.concatenate(preds)
+    targets = np.concatenate(targets)
+
+    # 确定当前是哪个session
+    current_session = 1
+    if hasattr(args, 'num_seen_classes') and hasattr(args, 'num_labeled_classes') and hasattr(args,
+                                                                                              'num_novel_class_per_session'):
+        if args.num_seen_classes > args.num_labeled_classes:
+            completed_sessions = (args.num_seen_classes - args.num_labeled_classes) // args.num_novel_class_per_session
+            current_session = completed_sessions + 1
+
+    session_str = f"session_{current_session}"
+
+    # 生成混淆矩阵和类别预测分布（在最后一个epoch）
+    if hasattr(args, 'log_dir') and epoch == args.epochs_online_per_session - 1:
+        try:
+            # 创建可视化目录
+            vis_dir = os.path.join(args.log_dir, 'visualizations')
+            os.makedirs(vis_dir, exist_ok=True)
+
+            # 生成混淆矩阵
+            from sklearn.metrics import confusion_matrix
+            import matplotlib.pyplot as plt
+            import seaborn as sns
+
+            # 获取数据中存在的所有类别
+            all_classes = sorted(list(set(targets.tolist() + preds.tolist())))
+
+            # 生成混淆矩阵
+            cm = confusion_matrix(targets, preds, labels=all_classes)
+
+            # 创建图表
+            plt.figure(figsize=(12, 10))
+            sns.heatmap(cm, fmt='d', cmap='Blues',
+                        xticklabels=all_classes,
+                        yticklabels=all_classes)
+
+            plt.xlabel('Prediction')
+            plt.ylabel('Ground Truth')
+            plt.title(f'Confusion Matrix - {session_str}')
+
+            # 保存混淆矩阵
+            conf_matrix_path = os.path.join(vis_dir, f'confusion_matrix_{session_str}.png')
+            plt.tight_layout()
+            plt.savefig(conf_matrix_path)
+            plt.close()
+            args.logger.info(f"Confusion matrix saved to: {conf_matrix_path}")
+
+            # 类别预测分布可视化
+            # 提取新类别的预测计数
+            new_class_counts = class_prediction_counts[args.num_labeled_classes:]
+
+            # 根据预测次数从大到小排序
+            sorted_indices = np.argsort(new_class_counts)[::-1]
+            sorted_counts = new_class_counts[sorted_indices]
+
+            # 可视化预测分布
+            plt.style.use('default')
+            plt.figure(figsize=(20, 16), dpi=300)
+            plt.bar(range(args.num_unlabeled_classes), sorted_counts, color='deepskyblue')
+            plt.xlabel('Class Index (Sorted by Prediction Count)', fontsize=20)
+            plt.ylabel('Instance Count', fontsize=20)
+            plt.title(f'New Classes Prediction Distribution - {session_str}', fontsize=20)
+
+            # 添加平均线
+            avg_count = np.mean(new_class_counts)
+            plt.axhline(y=avg_count, color='red', linestyle='--',
+                        label=f'Average Count: {avg_count:.2f}')
+
+            # 添加统计信息
+            unpredicted = np.sum(new_class_counts == 0)
+            if unpredicted > 0:
+                plt.annotate(f'{unpredicted} classes with zero predictions',
+                             xy=(0.7, 0.9), xycoords='axes fraction',
+                             bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8),
+                             fontsize=16)
+
+            plt.xticks(range(0, args.num_unlabeled_classes, 10), fontsize=16)
+            plt.legend(fontsize=16)
+            plt.grid(axis='y')
+
+            # 保存图像
+            dist_path = os.path.join(vis_dir, f'class_distribution_{session_str}.png')
+            plt.savefig(dist_path)
+            plt.close()
+            args.logger.info(f"Class prediction distribution saved to: {dist_path}")
+
+            # 额外添加：对比新旧类别预测
+            plt.figure(figsize=(12, 8), dpi=300)
+
+            # 旧类和新类的平均预测计数
+            old_class_counts = class_prediction_counts[:args.num_labeled_classes]
+            old_avg = np.mean(old_class_counts)
+            new_avg = np.mean(new_class_counts)
+
+            # 绘制条形图
+            plt.bar(['Old Classes', 'New Classes'], [old_avg, new_avg],
+                    color=['cornflowerblue', 'lightcoral'])
+            plt.ylabel('Average Predictions per Class', fontsize=16)
+            plt.title(f'Old vs New Classes Prediction Balance - {session_str}', fontsize=18)
+
+            # 添加比例标注
+            ratio = old_avg / new_avg if new_avg > 0 else float('inf')
+            plt.annotate(f'Old/New Ratio: {ratio:.2f}\n(Lower is better)',
+                         xy=(0.5, 0.8), xycoords='axes fraction',
+                         ha='center', fontsize=16,
+                         bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8))
+
+            plt.grid(axis='y')
+
+            # 保存图像
+            ratio_path = os.path.join(vis_dir, f'old_new_ratio_{session_str}.png')
+            plt.savefig(ratio_path)
+            plt.close()
+            args.logger.info(f"Old/new prediction ratio saved to: {ratio_path}")
+
+        except Exception as e:
+            args.logger.warning(f"Could not generate visualizations: {str(e)}")
+            import traceback
+            args.logger.warning(traceback.format_exc())
+
+    # 计算评估指标
+    all_acc, old_acc, new_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_hard,
+                                                    T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
+                                                    args=args)
+
+    all_acc_soft, seen_acc, unseen_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_soft,
+                                                             T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
+                                                             args=args)
+
+    # 记录结果摘要
+    args.logger.info(f"\nTest results summary (Epoch {epoch}):")
+    args.logger.info(f"Hard metrics: All={all_acc:.4f}, Old={old_acc:.4f}, New={new_acc:.4f}")
+    args.logger.info(f"Soft metrics: All={all_acc_soft:.4f}, Seen={seen_acc:.4f}, Unseen={unseen_acc:.4f}")
+
+    return all_acc, old_acc, new_acc, all_acc_soft, seen_acc, unseen_acc
 '''====================================================================================================================='''
 
 
