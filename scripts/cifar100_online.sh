@@ -10,7 +10,7 @@ CUDA_VISIBLE_DEVICES=0 python train.py \
     --transform 'imagenet' \
     --warmup_teacher_temp 0.05 \
     --teacher_temp 0.05 \
-    --warmup_teacher_temp_epochs 10 \
+    --warmup_teacher_temp_epochs 1 \
     --lr 0.01 \
     --memax_old_new_weight 1 \
     --memax_old_in_weight 1 \
@@ -23,7 +23,7 @@ CUDA_VISIBLE_DEVICES=0 python train.py \
     --num_old_classes 50 \
     --prop_train_labels 0.8 \
     --train_session online \
-    --epochs_online_per_session 50 \
+    --epochs_online_per_session 2 \
     --continual_session_num 5 \
     --online_novel_unseen_num 400 \
     --online_old_seen_num 25 \

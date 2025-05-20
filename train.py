@@ -377,7 +377,7 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
         args.logger.info('Testing on disjoint test set...')
         all_acc_test, old_acc_test, new_acc_test, \
             all_acc_soft_test, seen_acc_test, unseen_acc_test = test_online(student, test_loader, epoch=epoch,
-                                                                            save_name='Test ACC', args=args)
+                                                                            save_name='Test ACC', current_session=current_session, args=args)
         args.logger.info(
             'Test Accuracies (Hard): All {:.4f} | Old {:.4f} | New {:.4f}'.format(all_acc_test, old_acc_test,
                                                                                   new_acc_test))
@@ -595,7 +595,7 @@ def test_online(model, test_loader, epoch, save_name, args):
 '''
 
 
-def test_online(model, test_loader, epoch, save_name, args):
+def test_online(model, test_loader, epoch, save_name, current_session, args):
     """
     Online testing function for PromptEnhancedModel.
     """
@@ -643,12 +643,12 @@ def test_online(model, test_loader, epoch, save_name, args):
     targets = np.concatenate(targets)
 
     # 确定当前是哪个session
-    current_session = 1
-    if hasattr(args, 'num_seen_classes') and hasattr(args, 'num_labeled_classes') and hasattr(args,
-                                                                                              'num_novel_class_per_session'):
-        if args.num_seen_classes > args.num_labeled_classes:
-            completed_sessions = (args.num_seen_classes - args.num_labeled_classes) // args.num_novel_class_per_session
-            current_session = completed_sessions + 1
+    # current_session = 1
+    # if hasattr(args, 'num_seen_classes') and hasattr(args, 'num_labeled_classes') and hasattr(args,
+    #                                                                                           'num_novel_class_per_session'):
+    #     if args.num_seen_classes > args.num_labeled_classes:
+    #         completed_sessions = (args.num_seen_classes - args.num_labeled_classes) // args.num_novel_class_per_session
+    #         current_session = completed_sessions + 1
 
     session_str = f"session_{current_session}"
 
@@ -678,10 +678,10 @@ def test_online(model, test_loader, epoch, save_name, args):
 
             plt.xlabel('Prediction')
             plt.ylabel('Ground Truth')
-            plt.title(f'Confusion Matrix - {session_str}')
+            plt.title(f'Confusion Matrix - {current_session}')
 
             # 保存混淆矩阵
-            conf_matrix_path = os.path.join(vis_dir, f'confusion_matrix_{session_str}.png')
+            conf_matrix_path = os.path.join(vis_dir, f'confusion_matrix_{current_session}.png')
             plt.tight_layout()
             plt.savefig(conf_matrix_path)
             plt.close()
@@ -701,7 +701,7 @@ def test_online(model, test_loader, epoch, save_name, args):
             plt.bar(range(args.num_unlabeled_classes), sorted_counts, color='deepskyblue')
             plt.xlabel('Class Index (Sorted by Prediction Count)', fontsize=20)
             plt.ylabel('Instance Count', fontsize=20)
-            plt.title(f'New Classes Prediction Distribution - {session_str}', fontsize=20)
+            plt.title(f'New Classes Prediction Distribution - {current_session}', fontsize=20)
 
             # 添加平均线
             avg_count = np.mean(new_class_counts)
@@ -721,7 +721,7 @@ def test_online(model, test_loader, epoch, save_name, args):
             plt.grid(axis='y')
 
             # 保存图像
-            dist_path = os.path.join(vis_dir, f'class_distribution_{session_str}.png')
+            dist_path = os.path.join(vis_dir, f'class_distribution_{current_session}.png')
             plt.savefig(dist_path)
             plt.close()
             args.logger.info(f"Class prediction distribution saved to: {dist_path}")
@@ -738,7 +738,7 @@ def test_online(model, test_loader, epoch, save_name, args):
             plt.bar(['Old Classes', 'New Classes'], [old_avg, new_avg],
                     color=['cornflowerblue', 'lightcoral'])
             plt.ylabel('Average Predictions per Class', fontsize=16)
-            plt.title(f'Old vs New Classes Prediction Balance - {session_str}', fontsize=18)
+            plt.title(f'Old vs New Classes Prediction Balance - {current_session}', fontsize=18)
 
             # 添加比例标注
             ratio = old_avg / new_avg if new_avg > 0 else float('inf')
@@ -750,7 +750,7 @@ def test_online(model, test_loader, epoch, save_name, args):
             plt.grid(axis='y')
 
             # 保存图像
-            ratio_path = os.path.join(vis_dir, f'old_new_ratio_{session_str}.png')
+            ratio_path = os.path.join(vis_dir, f'old_new_ratio_{current_session}.png')
             plt.savefig(ratio_path)
             plt.close()
             args.logger.info(f"Old/new prediction ratio saved to: {ratio_path}")
