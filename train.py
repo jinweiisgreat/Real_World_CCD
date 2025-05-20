@@ -492,109 +492,6 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
         visualize_graph_network(adjacency_matrix, graph_vis_path, max_nodes=5000, logger=args.logger)
         args.logger.info(f"Prompt network visualization saved to {graph_vis_path}")
 
-'''
-def test_online(model, test_loader, epoch, save_name, args):
-    """
-    Online testing function for PromptEnhancedModel.
-    """
-    # 确认使用的是PromptEnhancedModel
-    assert isinstance(model, PromptEnhancedModel), f"Expected PromptEnhancedModel but got {type(model)}"
-
-    model.eval()
-
-    preds, targets = [], []
-    mask_hard = np.array([])
-    mask_soft = np.array([])
-
-    for batch_idx, batch in enumerate(tqdm(test_loader, desc="Evaluating")):
-        # 处理不同格式的数据加载器
-        if len(batch) == 2:
-            images, label = batch
-        elif len(batch) >= 3:
-            images, label, _ = batch[:3]
-
-        images = images.cuda(non_blocking=True)
-
-        with torch.no_grad():
-            # 直接使用PromptEnhancedModel的forward方法
-            _, logits = model(images)
-
-            batch_preds = logits.argmax(1).cpu().numpy()
-            preds.append(batch_preds)
-            targets.append(label.cpu().numpy())
-
-            # 创建不同评估指标的掩码
-            mask_hard = np.append(mask_hard, np.array([True if x.item() in range(len(args.train_classes))
-                                                       else False for x in label]))
-            mask_soft = np.append(mask_soft, np.array([True if x.item() in range(args.num_seen_classes)
-                                                       else False for x in label]))
-
-    preds = np.concatenate(preds)
-    targets = np.concatenate(targets)
-
-    # 生成混淆矩阵（在最后一个epoch）
-    if hasattr(args, 'log_dir') and hasattr(args,
-                                            'epochs_online_per_session') and epoch == args.epochs_online_per_session - 1:
-        try:
-            from sklearn.metrics import confusion_matrix
-            import matplotlib.pyplot as plt
-            import seaborn as sns
-
-            # 获取数据中存在的所有类别
-            all_classes = sorted(list(set(targets.tolist() + preds.tolist())))
-
-            # 生成混淆矩阵
-            cm = confusion_matrix(targets, preds, labels=all_classes)
-
-            # 创建图表
-            plt.figure(figsize=(12, 10))
-            sns.heatmap(cm, fmt='d', cmap='Blues',
-                        xticklabels=all_classes,
-                        yticklabels=all_classes)
-
-            plt.xlabel('Prediction')
-            plt.ylabel('Ground Truth')
-            plt.title(f'Confusion Matrix (Epoch {epoch})')
-
-            # 确定当前是哪个session
-            current_session = 1
-            if hasattr(args, 'num_seen_classes') and hasattr(args, 'num_labeled_classes') and hasattr(args,
-                                                                                                      'num_novel_class_per_session'):
-                if args.num_seen_classes > args.num_labeled_classes:
-                    completed_sessions = (
-                                                     args.num_seen_classes - args.num_labeled_classes) // args.num_novel_class_per_session
-                    current_session = completed_sessions + 1
-
-            session_str = f"session_{current_session}"
-
-            # 保存混淆矩阵
-            conf_matrix_path = os.path.join(args.log_dir, f'confusion_matrix_{session_str}.png')
-            plt.tight_layout()
-            plt.savefig(conf_matrix_path)
-            plt.close()
-            args.logger.info(f"Confusion matrix saved to: {conf_matrix_path}")
-
-        except Exception as e:
-            args.logger.info(f"Could not generate confusion matrix: {str(e)}")
-
-    # 计算评估指标
-    all_acc, old_acc, new_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_hard,
-                                                    T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
-                                                    args=args)
-
-    all_acc_soft, seen_acc, unseen_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_soft,
-                                                             T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
-                                                             args=args)
-
-    # 记录结果摘要
-    args.logger.info(f"\nTest results summary (Epoch {epoch}):")
-    args.logger.info(f"Hard metrics: All={all_acc:.4f}, Old={old_acc:.4f}, New={new_acc:.4f}")
-    args.logger.info(f"Soft metrics: All={all_acc_soft:.4f}, Seen={seen_acc:.4f}, Unseen={unseen_acc:.4f}")
-
-    return all_acc, old_acc, new_acc, all_acc_soft, seen_acc, unseen_acc
-'''
-
-
 def test_online(model, test_loader, epoch, save_name, current_session, args):
     """
     Online testing function for PromptEnhancedModel.
@@ -641,16 +538,6 @@ def test_online(model, test_loader, epoch, save_name, current_session, args):
 
     preds = np.concatenate(preds)
     targets = np.concatenate(targets)
-
-    # 确定当前是哪个session
-    # current_session = 1
-    # if hasattr(args, 'num_seen_classes') and hasattr(args, 'num_labeled_classes') and hasattr(args,
-    #                                                                                           'num_novel_class_per_session'):
-    #     if args.num_seen_classes > args.num_labeled_classes:
-    #         completed_sessions = (args.num_seen_classes - args.num_labeled_classes) // args.num_novel_class_per_session
-    #         current_session = completed_sessions + 1
-
-    session_str = f"session_{current_session}"
 
     # 生成混淆矩阵和类别预测分布（在最后一个epoch）
     if hasattr(args, 'log_dir') and epoch == args.epochs_online_per_session - 1:
