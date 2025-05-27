@@ -31,5 +31,5 @@ CUDA_VISIBLE_DEVICES=0 python train_happy.py \
     --init_new_head \
     --load_offline_id Old50_Ratio0.8_20250513-155706 \
     --shuffle_classes \
-    --seed 1
+    --seed 0
     # --prompt_pool
