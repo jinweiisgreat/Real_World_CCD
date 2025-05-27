@@ -1,5 +1,5 @@
 """
-get_datasets 修改版：集成CLEAR数据集
+官网更新get_dataset
 2025_2_23
 author: wei jin
 """
@@ -18,15 +18,13 @@ from data.imagenet import get_imagenet_100_datasets
 from data.cub import get_cub_datasets
 from data.fgvc_aircraft import get_aircraft_datasets
 from data.stanford_cars import get_scars_datasets
-# 导入CLEAR数据集实现
-from data.clear import get_clear_datasets
+
 from data.cifar import subsample_classes as subsample_dataset_cifar
 from data.tiny_imagenet import subsample_classes as subsample_dataset_tiny_imagenet
 from data.imagenet import subsample_classes as subsample_dataset_imagenet
 from data.cub import subsample_classes as subsample_dataset_cub
 from data.fgvc_aircraft import subsample_classes as subsample_dataset_aircraft
 from data.stanford_cars import subsample_classes as subsample_dataset_scars
-from data.clear import subsample_classes as subsample_dataset_clear
 
 from config import osr_split_dir
 
@@ -39,7 +37,6 @@ sub_sample_class_funcs = {
     'cub': subsample_dataset_cub,
     'aircraft': subsample_dataset_aircraft,
     'scars': subsample_dataset_scars,
-    'clear10': subsample_dataset_clear,  # 添加CLEAR10
 }
 
 get_dataset_funcs = {
@@ -50,7 +47,6 @@ get_dataset_funcs = {
     'cub': get_cub_datasets,
     'aircraft': get_aircraft_datasets,
     'scars': get_scars_datasets,
-    'clear10': get_clear_datasets,  # 添加CLEAR10
 }
 
 
@@ -80,8 +76,7 @@ def get_datasets(dataset_name, train_transform, test_transform, args):
                                                     prop_train_labels=args.prop_train_labels,
                                                     split_train_val=False,
                                                     is_shuffle=args.shuffle_classes,
-                                                    seed=args.seed, # NOTE!!! seed for shuffle
-                                                    test_mode=args.test_mode)
+                                                    seed=args.seed)   # NOTE!!! seed for shuffle
 
     # Set target transforms:
     target_transform_dict = {}
@@ -95,10 +90,9 @@ def get_datasets(dataset_name, train_transform, test_transform, args):
 
     for dataset_name, dataset in datasets.items():
         if dataset is not None:
-            if isinstance(dataset, list):
+            if type(dataset) is list:
                 for d in dataset:
-                    if d is not None:  # ✅ 加上判断
-                        d.target_transform = target_transform
+                    d.target_transform = target_transform
             else:
                 dataset.target_transform = target_transform
 
@@ -163,19 +157,6 @@ def get_class_splits(args):
             args.train_classes = range(args.num_old_classes)
             args.unlabeled_classes = range(args.num_old_classes, 100)
 
-    # ------------------------------ CLEAR10 -------------------------------
-    elif args.dataset_name == 'clear10':
-
-        args.image_size = 224
-        args.train_classes = range(7)
-        args.unlabeled_classes = range(7, 10)
-
-        if args.num_old_classes > 0:
-            args.train_classes = range(args.num_old_classes)
-            args.unlabeled_classes = range(args.num_old_classes, 10)
-
-    # ----------------------------------------------------------------------
-
     elif args.dataset_name == 'tiny_imagenet':
 
         args.image_size = 64
@@ -218,8 +199,9 @@ def get_class_splits(args):
             args.unlabeled_classes = range(100, 200)
 
         if args.num_old_classes > 0:
-            args.train_classes = range(args.num_old_classes)
-            args.unlabeled_classes = range(args.num_old_classes, 200)
+            full_classes = args.train_classes + args.unlabeled_classes
+            args.train_classes = full_classes[:args.num_old_classes]
+            args.unlabeled_classes = full_classes[args.num_old_classes:]
 
 
     elif args.dataset_name == 'scars':
@@ -242,8 +224,9 @@ def get_class_splits(args):
             args.unlabeled_classes = range(98, 196)
 
         if args.num_old_classes > 0:
-            args.train_classes = range(args.num_old_classes)
-            args.unlabeled_classes = range(args.num_old_classes, 196)
+            full_classes = args.train_classes + args.unlabeled_classes
+            args.train_classes = full_classes[:args.num_old_classes]
+            args.unlabeled_classes = full_classes[args.num_old_classes:]
 
 
     elif args.dataset_name == 'aircraft':
@@ -265,8 +248,10 @@ def get_class_splits(args):
             args.unlabeled_classes = range(50, 100)
 
         if args.num_old_classes > 0:
-            args.train_classes = range(args.num_old_classes)
-            args.unlabeled_classes = range(args.num_old_classes, 100)
+            full_classes = args.train_classes + args.unlabeled_classes
+            args.train_classes = full_classes[:args.num_old_classes]
+            args.unlabeled_classes = full_classes[args.num_old_classes:]
+
 
 
     elif args.dataset_name == 'herbarium_19':
