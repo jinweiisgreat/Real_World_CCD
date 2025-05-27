@@ -571,9 +571,9 @@ def test_online(model, test_loader, epoch, save_name, args):
                                                              args=args)
 
     # Log results summary
-    args.logger.info(f"\nTest results summary (Epoch {epoch}):")
-    args.logger.info(f"Hard metrics: All={all_acc:.4f}, Old={old_acc:.4f}, New={new_acc:.4f}")
-    args.logger.info(f"Soft metrics: All={all_acc_soft:.4f}, Seen={seen_acc:.4f}, Unseen={unseen_acc:.4f}")
+    # args.logger.info(f"\nTest results summary (Epoch {epoch}):")
+    # args.logger.info(f"Hard metrics: All={all_acc:.4f}, Old={old_acc:.4f}, New={new_acc:.4f}")
+    # args.logger.info(f"Soft metrics: All={all_acc_soft:.4f}, Seen={seen_acc:.4f}, Unseen={unseen_acc:.4f}")
 
     return all_acc, old_acc, new_acc, all_acc_soft, seen_acc, unseen_acc
 
@@ -855,8 +855,9 @@ if __name__ == "__main__":
                 projector_pre = DINOHead(in_dim=args.feat_dim, out_dim=args.num_labeled_classes, nlayers=args.num_mlp_layers)
                 model_pre = nn.Sequential(backbone, projector_pre)
                 if args.load_offline_id is not None:
-                    load_dir_online = os.path.join(exp_root + '_' + 'offline', args.dataset_name, args.load_offline_id, 'checkpoints', 'model_best.pt') # session 0 加载的是离线训练的模型
+                    # load_dir_online = os.path.join(exp_root + '_' + 'offline', args.dataset_name, args.load_offline_id, 'checkpoints', 'model_best.pt') # session 0 加载的是离线训练的模型
                     # load_dir_online = '/home/ps/_jinwei/Happy-CGCD/Official_checkpoints/C100_Stage0/model_best.pt'
+                    load_dir_online = '/home/ps/_jinwei/Happy-CGCD/dev_outputs_offline/cifar100/Old50_Ratio0.8_20250405-192649/checkpoints/model_best.pt'
                     args.logger.info('loading offline checkpoints from: ' + load_dir_online)
                     load_dict = torch.load(load_dir_online)
                     model_pre.load_state_dict(load_dict['model'])
