@@ -24,6 +24,13 @@ from models import vision_transformer as vits
 from config import dino_pretrain_path, exp_root
 from collections import Counter
 
+from sklearn.metrics import confusion_matrix
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+import setproctitle
+setproctitle.setproctitle("xiao wei's python process")
+
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -350,113 +357,6 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
     args.best_test_acc_seen_list.append(best_test_acc_seen)
     args.best_test_acc_unseen_list.append(best_test_acc_unseen)
 
-# 手动计算匈牙利匹配
-"""
-def test_online(model, test_loader, epoch, save_name, args):
-    model.eval()
-
-    preds, targets = [], []
-    mask_hard = np.array([])
-    mask_soft = np.array([])
-    for batch_idx, (images, label, _) in enumerate(tqdm(test_loader)):
-        images = images.cuda(non_blocking=True)
-        with torch.no_grad():
-            _, logits = model(images)
-            preds.append(logits.argmax(1).cpu().numpy())
-            targets.append(label.cpu().numpy())
-
-            # args.train_classes 原始训练时定义的类别
-            mask_hard = np.append(mask_hard, np.array([True if x.item() in range(len(args.train_classes))
-                                                       else False for x in label]))
-            # args.num_seen_classes 当前已见类别范围
-            mask_soft = np.append(mask_soft, np.array([True if x.item() in range(args.num_seen_classes)
-                                                       else False for x in label]))
-
-    preds = np.concatenate(preds)
-    targets = np.concatenate(targets)
-
-    # -----------------------
-    # EVALUATE
-    # -----------------------
-    all_acc, old_acc, new_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_hard,
-                                                    T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
-                                                    args=args)
-
-    all_acc_soft, seen_acc, unseen_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_soft,
-                                                             T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
-                                                             args=args)
-
-    # 手动计算各个准确率 - 使用匈牙利算法进行标签重映射
-    from scipy.optimize import linear_sum_assignment
-
-    # 构建混淆矩阵
-    D = max(preds.max(), targets.max()) + 1
-    w = np.zeros((D, D), dtype=int)
-    for i in range(preds.size):
-        w[preds[i], targets[i]] += 1
-
-    # 应用匈牙利算法找到最佳标签映射
-    row_ind, col_ind = linear_sum_assignment(w.max() - w)
-    ind_map = {j: i for i, j in zip(col_ind, row_ind)}
-
-    # 重映射预测结果
-    remapped_preds = np.array([ind_map.get(p, p) for p in preds])
-
-    # 整体准确率 (使用重映射后的预测)
-    all_correct = np.sum(remapped_preds == targets)
-    all_total = len(targets)
-    all_Acc = all_correct / all_total
-    all_Acc_soft = all_Acc  # 这两个是相同的
-    print("all_Acc (remapped):", all_Acc)
-
-    # 旧类别准确率 (使用mask_hard和重映射后的预测)
-    old_preds = remapped_preds[mask_hard.astype(bool)]
-    old_targets = targets[mask_hard.astype(bool)]
-    old_correct = np.sum(old_preds == old_targets)
-    old_total = len(old_targets)
-    old_Acc = old_correct / max(old_total, 1)
-    print("old_Acc (remapped):", old_Acc)
-
-    # 新类别准确率 (使用mask_hard的反面和重映射后的预测)
-    new_preds = remapped_preds[~mask_hard.astype(bool)]
-    new_targets = targets[~mask_hard.astype(bool)]
-    new_correct = np.sum(new_preds == new_targets)
-    new_total = len(new_targets)
-    new_Acc = new_correct / max(new_total, 1)
-    print("new_Acc (remapped):", new_Acc)
-
-    # 已见类别准确率 (使用mask_soft和重映射后的预测)
-    seen_preds = remapped_preds[mask_soft.astype(bool)]
-    seen_targets = targets[mask_soft.astype(bool)]
-    seen_correct = np.sum(seen_preds == seen_targets)
-    seen_total = len(seen_targets)
-    seen_Acc = seen_correct / max(seen_total, 1)
-    print("seen_Acc (remapped):", seen_Acc)
-
-    # 未见类别准确率 (使用mask_soft的反面和重映射后的预测)
-    unseen_preds = remapped_preds[~mask_soft.astype(bool)]
-    unseen_targets = targets[~mask_soft.astype(bool)]
-    unseen_correct = np.sum(unseen_preds == unseen_targets)
-    unseen_total = len(unseen_targets)
-    unseen_Acc = unseen_correct / max(unseen_total, 1)
-    print("unseen_Acc (remapped):", unseen_Acc)
-
-    # 输出未见类别的详细信息
-    args.logger.info(
-        f"Unseen correct (remapped): {unseen_correct}/{unseen_total} = {unseen_correct / max(unseen_total, 1):.4f}")
-
-    # 对比原始计算和重映射后的计算结果
-    args.logger.info(f"Comparing with log_accs_from_preds results:")
-    args.logger.info(f"All: {all_Acc:.4f} vs {all_acc:.4f}")
-    args.logger.info(f"Old: {old_Acc:.4f} vs {old_acc:.4f}")
-    args.logger.info(f"New: {new_Acc:.4f} vs {new_acc:.4f}")
-    args.logger.info(f"Seen: {seen_Acc:.4f} vs {seen_acc:.4f}")
-    args.logger.info(f"Unseen: {unseen_Acc:.4f} vs {unseen_acc:.4f}")
-
-    return all_acc, old_acc, new_acc, all_acc_soft, seen_acc, unseen_acc
-"""
-
-
 def test_online(model, test_loader, epoch, save_name, args):
     """
     Online testing function that only generates a confusion matrix.
@@ -471,12 +371,6 @@ def test_online(model, test_loader, epoch, save_name, args):
     Returns:
         Evaluation metrics
     """
-    import numpy as np
-    import os
-    import torch
-    from tqdm import tqdm
-    from project_utils.cluster_and_log_utils import log_accs_from_preds
-
     # ============================ Model evaluation ============================
     model.eval()
 
@@ -518,10 +412,6 @@ def test_online(model, test_loader, epoch, save_name, args):
     # -----------------------
     if hasattr(args, 'log_dir') and hasattr(args,'epochs_online_per_session') and epoch == args.epochs_online_per_session - 1:
         try:
-            from sklearn.metrics import confusion_matrix
-            import matplotlib.pyplot as plt
-            import seaborn as sns
-
             # Get all classes present in the data
             all_classes = sorted(list(set(targets.tolist() + preds.tolist())))
 
@@ -662,7 +552,7 @@ if __name__ == "__main__":
     args.num_unlabeled_classes = len(args.unlabeled_classes) # get_dataset
 
     args.exp_root = args.exp_root + '_' + args.train_session
-    args.exp_name = 'happy' + '-' + args.train_session
+    args.exp_name = 'Real_CGCD' + '-' + args.train_session
 
     if args.train_session == 'offline':
         args.base_exp_id = 'Old' + str(args.num_labeled_classes) + '_' + 'Ratio' + str(args.prop_train_labels)
@@ -857,7 +747,7 @@ if __name__ == "__main__":
                 if args.load_offline_id is not None:
                     # load_dir_online = os.path.join(exp_root + '_' + 'offline', args.dataset_name, args.load_offline_id, 'checkpoints', 'model_best.pt') # session 0 加载的是离线训练的模型
                     # load_dir_online = '/home/ps/_jinwei/Happy-CGCD/Official_checkpoints/C100_Stage0/model_best.pt'
-                    load_dir_online = '/home/ps/_jinwei/Happy-CGCD/dev_outputs_offline/cifar100/Old50_Ratio0.8_20250405-192649/checkpoints/model_best.pt'
+                    load_dir_online = '/home/ps/_jinwei/Happy-CGCD/dev_outputs_offline/cifar100/Old50_Ratio0.8_20250527-153553/checkpoints/model_best.pt'
                     args.logger.info('loading offline checkpoints from: ' + load_dir_online)
                     load_dict = torch.load(load_dir_online)
                     model_pre.load_state_dict(load_dict['model'])

@@ -18,6 +18,8 @@ from copy import deepcopy
 import numpy as np
 from torch.utils.data import DataLoader
 import torch
+torch.autograd.set_detect_anomaly(True)
+
 import torch.nn as nn
 from torch.optim import SGD, lr_scheduler
 
@@ -37,6 +39,8 @@ from collections import Counter
 from models.utils_prompt_pool import PromptPool
 from models.prompt_enhanced_model import PromptEnhancedModel
 from models.utils_prompt_pool import visualize_graph_network
+# imort Energy method
+from models.utils_split_novel import energy_based_sample_separation, EnhancedDistillLoss, compute_sample_type_loss
 
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -265,12 +269,43 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
         eta_min=args.lr * 1e-3,
     )
 
-    cluster_criterion = DistillLoss(
+    # ====================================================================
+    # ENERGY-BASED SAMPLE SEPARATION (Before Training)
+    # ====================================================================
+    args.logger.info("=" * 60)
+    args.logger.info("ENERGY-BASED SAMPLE SEPARATION")
+    args.logger.info("=" * 60)
+
+    seen_indices, unseen_indices, separation_stats = energy_based_sample_separation(
+        student_pre, train_loader, args
+    )
+
+    # Save separation statistics
+    separation_stats_path = os.path.join(args.model_dir, f'energy_separation_session_{current_session}.pt')
+    torch.save(separation_stats, separation_stats_path)
+    args.logger.info(f"Energy separation stats saved to {separation_stats_path}")
+
+    # ====================================================================
+    # LOSS CRITERIA SETUP
+    # ====================================================================
+
+    # Standard DistillLoss for seen samples
+    cluster_criterion_seen = DistillLoss(
         args.warmup_teacher_temp_epochs,
         args.epochs_online_per_session,
         args.n_views,
         args.warmup_teacher_temp,
         args.teacher_temp,
+    )
+
+    # Enhanced DistillLoss with Sinkhorn-Knopp for unseen samples
+    cluster_criterion_unseen = EnhancedDistillLoss(
+                                args.warmup_teacher_temp_epochs,
+                                args.epochs_online_per_session,
+                                args.n_views,
+                                args.warmup_teacher_temp,
+                                args.teacher_temp,
+                                sinkhorn=0.2
     )
 
     # best acc log
@@ -281,23 +316,58 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
     best_test_acc_seen = 0
     best_test_acc_unseen = 0
 
+    # ====================================================================
+    # TRAINING LOOP
+    # ====================================================================
+
     for epoch in range(args.epochs_online_per_session):
         loss_record = AverageMeter()
+        seen_loss_record = AverageMeter()
+        unseen_loss_record = AverageMeter()
 
         student.train()
         student_pre.eval()
+
         for batch_idx, batch in enumerate(train_loader):
+
             images, class_labels, uq_idxs, _ = batch
             mask_lab = torch.zeros_like(class_labels)  # all samples are unlabeled
 
             class_labels, mask_lab = class_labels.cuda(non_blocking=True), mask_lab.cuda(non_blocking=True).bool()
             images = torch.cat(images, dim=0).cuda(non_blocking=True)
 
+            # ================================================================
+            # DETERMINE SAMPLE TYPES BASED ON ENERGY SEPARATION
+            # ================================================================
+            sample_types = []
+            for uq_idx in uq_idxs:
+                if uq_idx.item() in seen_indices:
+                    sample_types.append('seen')
+                elif uq_idx.item() in unseen_indices:
+                    sample_types.append('unseen')
+                else:
+                    sample_types.append('uncertain')  # Fallback for edge cases
+
+            # Handle uncertain samples (assign to unseen for exploration)
+            sample_types = ['unseen' if t == 'uncertain' else t for t in sample_types]
+
             student_proj, student_out = student(images)
             teacher_out = student_out.detach()
 
+            # ================================================================
+            # CLUSTERING LOSS (ENERGY-BASED SEPARATION)
+            # ================================================================
+            cluster_loss, cluster_loss_info = compute_sample_type_loss(
+                student_proj, student_out, teacher_out, sample_types,
+                cluster_criterion_seen, cluster_criterion_unseen, epoch
+            )
+
             # clustering, unsup
-            cluster_loss = cluster_criterion(student_out, teacher_out, epoch)
+            # cluster_loss = cluster_criterion(student_out, teacher_out, epoch)
+
+            # ================================================================
+            # ENTROPY REGULARIZATION (GROUP-WISE)
+            # ================================================================
             avg_probs = (student_out / 0.1).softmax(dim=1).mean(dim=0)
 
             # 1. inter old and new
@@ -319,19 +389,22 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
                     float(len(avg_probs_new_in_norm)))
             else:
                 me_max_loss_new_in = torch.tensor(0.0, device=args.device)
-
             # overall me-max loss
             cluster_loss += args.memax_old_new_weight * me_max_loss_old_new + \
                             args.memax_old_in_weight * me_max_loss_old_in + args.memax_new_in_weight * me_max_loss_new_in
 
-            # represent learning, unsup
+            # ================================================================
+            # CONTRASTIVE LEARNING represent learning unsup
+            # ================================================================
             contrastive_logits, contrastive_labels = info_nce_logits(features=student_proj)
             contrastive_loss = torch.nn.CrossEntropyLoss()(contrastive_logits, contrastive_labels)
 
-            # ProtoAug_Loss
+            # ProtoAug_Loss reference：PASS
             proto_aug_loss = proto_aug_manager.compute_proto_aug_hardness_aware_loss(student)
 
-            # Feature distillation
+            # ================================================================
+            # FEATURE DISTILLATION
+            # ================================================================
             feats = student.backbone(images)
             feats = torch.nn.functional.normalize(feats, dim=-1)
             with torch.no_grad():
@@ -347,12 +420,20 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             loss += args.proto_aug_weight * proto_aug_loss
             loss += args.feat_distill_weight * feat_distill_loss
 
-            # logs
+            # ================================================================
+            # LOGGING
+            # ================================================================
             pstr = ''
             pstr += f'me_max_loss_old_new: {me_max_loss_old_new.item():.4f} '
             pstr += f'me_max_loss_old_in: {me_max_loss_old_in.item():.4f} '
             pstr += f'me_max_loss_new_in: {me_max_loss_new_in.item():.4f} '
             pstr += f'cluster_loss: {cluster_loss.item():.4f} '
+            if 'seen_loss' in cluster_loss_info:
+                pstr += f'seen_loss: {cluster_loss_info["seen_loss"]:.4f} '
+                seen_loss_record.update(cluster_loss_info["seen_loss"], 1)
+            if 'unseen_loss' in cluster_loss_info:
+                pstr += f'unseen_loss: {cluster_loss_info["unseen_loss"]:.4f} '
+                unseen_loss_record.update(cluster_loss_info["unseen_loss"], 1)
             pstr += f'contrastive_loss: {contrastive_loss.item():.4f} '
             pstr += f'proto_aug_loss: {proto_aug_loss.item():.4f} '
             pstr += f'feat_distill_loss: {feat_distill_loss.item():.4f} '
@@ -365,6 +446,12 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             if batch_idx % args.print_freq == 0:
                 args.logger.info('Epoch: [{}][{}/{}]\t loss {:.5f}\t {}'
                                  .format(epoch, batch_idx, len(train_loader), loss.item(), pstr))
+
+                # Additional energy-based statistics
+                seen_count = sum(1 for t in sample_types if t == 'seen')
+                unseen_count = sum(1 for t in sample_types if t == 'unseen')
+                args.logger.info(f'Batch composition: Seen: {seen_count}, Unseen: {unseen_count}')
+
                 new_true_ratio = len(class_labels[class_labels >= args.num_seen_classes]) / len(class_labels)
                 logits = student_out / 0.1
                 preds = logits.argmax(1)
@@ -372,18 +459,23 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
                 args.logger.info(
                     f'Avg old prob: {torch.sum(avg_probs_old_in).item():.4f} | Avg new prob: {torch.sum(avg_probs_new_in).item():.4f} | Pred new ratio: {new_pred_ratio:.4f} | Ground-truth new ratio: {new_true_ratio:.4f}')
 
-        args.logger.info('Train Epoch: {} Avg Loss: {:.4f} '.format(epoch, loss_record.avg))
+        # args.logger.info('Train Epoch: {} Avg Loss: {:.4f} '.format(epoch, loss_record.avg))
+
+        # ================================================================
+        # EPOCH SUMMARY
+        # ================================================================
+        epoch_summary = f'Train Epoch: {epoch} Avg Loss: {loss_record.avg:.4f}'
+        if seen_loss_record.count > 0:
+            epoch_summary += f' | Seen Loss: {seen_loss_record.avg:.4f}'
+        if unseen_loss_record.count > 0:
+            epoch_summary += f' | Unseen Loss: {unseen_loss_record.avg:.4f}'
+        args.logger.info(epoch_summary)
 
         args.logger.info('Testing on disjoint test set...')
         all_acc_test, old_acc_test, new_acc_test, \
-            all_acc_soft_test, seen_acc_test, unseen_acc_test = test_online(student, test_loader, epoch=epoch,
-                                                                            save_name='Test ACC', current_session=current_session, args=args)
-        args.logger.info(
-            'Test Accuracies (Hard): All {:.4f} | Old {:.4f} | New {:.4f}'.format(all_acc_test, old_acc_test,
-                                                                                  new_acc_test))
-        args.logger.info(
-            'Test Accuracies (Soft): All {:.4f} | Seen {:.4f} | Unseen {:.4f}'.format(all_acc_soft_test, seen_acc_test,
-                                                                                      unseen_acc_test))
+            all_acc_soft_test, seen_acc_test, unseen_acc_test = test_online(student, test_loader, epoch=epoch, save_name='Test ACC', current_session=current_session, args=args)
+        args.logger.info('Test Accuracies (Hard): All {:.4f} | Old {:.4f} | New {:.4f}'.format(all_acc_test, old_acc_test, new_acc_test))
+        args.logger.info('Test Accuracies (Soft): All {:.4f} | Seen {:.4f} | Unseen {:.4f}'.format(all_acc_soft_test, seen_acc_test, unseen_acc_test))
 
         # Step schedule
         exp_lr_scheduler.step()
@@ -396,6 +488,7 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
 
         if all_acc_test > best_test_acc_all:
             args.logger.info(f'Best ACC on All Classes on test set of session-{current_session}: {all_acc_test:.4f}...')
+
             torch.save(save_dict, args.model_path[:-3] + '_session-' + str(current_session) + f'_best.pt')
             args.logger.info(
                 "model saved to {}.".format(args.model_path[:-3] + '_session-' + str(current_session) + f'_best.pt'))
@@ -403,6 +496,7 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             best_test_acc_all = all_acc_test
             best_test_acc_old = old_acc_test
             best_test_acc_new = new_acc_test
+
             best_test_acc_soft_all = all_acc_soft_test
             best_test_acc_seen = seen_acc_test
             best_test_acc_unseen = unseen_acc_test
@@ -491,6 +585,112 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
         graph_vis_path = os.path.join(args.model_dir, f'prompt_network_session_{current_session}.png')
         visualize_graph_network(adjacency_matrix, graph_vis_path, max_nodes=5000, logger=args.logger)
         args.logger.info(f"Prompt network visualization saved to {graph_vis_path}")
+
+# 手动计算匈牙利匹配
+"""
+def test_online(model, test_loader, epoch, save_name, args):
+    model.eval()
+
+    preds, targets = [], []
+    mask_hard = np.array([])
+    mask_soft = np.array([])
+    for batch_idx, (images, label, _) in enumerate(tqdm(test_loader)):
+        images = images.cuda(non_blocking=True)
+        with torch.no_grad():
+            _, logits = model(images)
+            preds.append(logits.argmax(1).cpu().numpy())
+            targets.append(label.cpu().numpy())
+
+            # args.train_classes 原始训练时定义的类别
+            mask_hard = np.append(mask_hard, np.array([True if x.item() in range(len(args.train_classes))
+                                                       else False for x in label]))
+            # args.num_seen_classes 当前已见类别范围
+            mask_soft = np.append(mask_soft, np.array([True if x.item() in range(args.num_seen_classes)
+                                                       else False for x in label]))
+
+    preds = np.concatenate(preds)
+    targets = np.concatenate(targets)
+
+    # -----------------------
+    # EVALUATE
+    # -----------------------
+    all_acc, old_acc, new_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_hard,
+                                                    T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
+                                                    args=args)
+
+    all_acc_soft, seen_acc, unseen_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_soft,
+                                                             T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
+                                                             args=args)
+
+    # 手动计算各个准确率 - 使用匈牙利算法进行标签重映射
+    from scipy.optimize import linear_sum_assignment
+
+    # 构建混淆矩阵
+    D = max(preds.max(), targets.max()) + 1
+    w = np.zeros((D, D), dtype=int)
+    for i in range(preds.size):
+        w[preds[i], targets[i]] += 1
+
+    # 应用匈牙利算法找到最佳标签映射
+    row_ind, col_ind = linear_sum_assignment(w.max() - w)
+    ind_map = {j: i for i, j in zip(col_ind, row_ind)}
+
+    # 重映射预测结果
+    remapped_preds = np.array([ind_map.get(p, p) for p in preds])
+
+    # 整体准确率 (使用重映射后的预测)
+    all_correct = np.sum(remapped_preds == targets)
+    all_total = len(targets)
+    all_Acc = all_correct / all_total
+    all_Acc_soft = all_Acc  # 这两个是相同的
+    print("all_Acc (remapped):", all_Acc)
+
+    # 旧类别准确率 (使用mask_hard和重映射后的预测)
+    old_preds = remapped_preds[mask_hard.astype(bool)]
+    old_targets = targets[mask_hard.astype(bool)]
+    old_correct = np.sum(old_preds == old_targets)
+    old_total = len(old_targets)
+    old_Acc = old_correct / max(old_total, 1)
+    print("old_Acc (remapped):", old_Acc)
+
+    # 新类别准确率 (使用mask_hard的反面和重映射后的预测)
+    new_preds = remapped_preds[~mask_hard.astype(bool)]
+    new_targets = targets[~mask_hard.astype(bool)]
+    new_correct = np.sum(new_preds == new_targets)
+    new_total = len(new_targets)
+    new_Acc = new_correct / max(new_total, 1)
+    print("new_Acc (remapped):", new_Acc)
+
+    # 已见类别准确率 (使用mask_soft和重映射后的预测)
+    seen_preds = remapped_preds[mask_soft.astype(bool)]
+    seen_targets = targets[mask_soft.astype(bool)]
+    seen_correct = np.sum(seen_preds == seen_targets)
+    seen_total = len(seen_targets)
+    seen_Acc = seen_correct / max(seen_total, 1)
+    print("seen_Acc (remapped):", seen_Acc)
+
+    # 未见类别准确率 (使用mask_soft的反面和重映射后的预测)
+    unseen_preds = remapped_preds[~mask_soft.astype(bool)]
+    unseen_targets = targets[~mask_soft.astype(bool)]
+    unseen_correct = np.sum(unseen_preds == unseen_targets)
+    unseen_total = len(unseen_targets)
+    unseen_Acc = unseen_correct / max(unseen_total, 1)
+    print("unseen_Acc (remapped):", unseen_Acc)
+
+    # 输出未见类别的详细信息
+    args.logger.info(
+        f"Unseen correct (remapped): {unseen_correct}/{unseen_total} = {unseen_correct / max(unseen_total, 1):.4f}")
+
+    # 对比原始计算和重映射后的计算结果
+    args.logger.info(f"Comparing with log_accs_from_preds results:")
+    args.logger.info(f"All: {all_Acc:.4f} vs {all_acc:.4f}")
+    args.logger.info(f"Old: {old_Acc:.4f} vs {old_acc:.4f}")
+    args.logger.info(f"New: {new_Acc:.4f} vs {new_acc:.4f}")
+    args.logger.info(f"Seen: {seen_Acc:.4f} vs {seen_acc:.4f}")
+    args.logger.info(f"Unseen: {unseen_Acc:.4f} vs {unseen_acc:.4f}")
+
+    return all_acc, old_acc, new_acc, all_acc_soft, seen_acc, unseen_acc
+"""
 
 def test_online(model, test_loader, epoch, save_name, current_session, args):
     """

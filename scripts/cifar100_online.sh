@@ -12,7 +12,7 @@ CUDA_VISIBLE_DEVICES=0 python train_happy.py \
     --teacher_temp 0.05 \
     --warmup_teacher_temp_epochs 10 \
     --lr 0.01 \
-    --memax_old_new_weight 1 \
+    --memax_old_new_weight 5 \
     --memax_old_in_weight 1 \
     --memax_new_in_weight 1 \
     --proto_aug_weight 1 \
@@ -29,7 +29,7 @@ CUDA_VISIBLE_DEVICES=0 python train_happy.py \
     --online_old_seen_num 25 \
     --online_novel_seen_num 25 \
     --init_new_head \
-    --load_offline_id Old50_Ratio0.8_20250513-155706 \
+    --load_offline_id Old50_Ratio0.8_20250527-153553 \
     --shuffle_classes \
     --seed 0
     # --prompt_pool

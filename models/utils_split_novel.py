@@ -1,22 +1,519 @@
+"""
+Energy-based Novel Class Detection and Enhanced Distillation Loss
+Author: Wei Jin
+Date: 2025
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from sklearn.mixture import GaussianMixture
 from tqdm import tqdm
-import os
+import math
 import matplotlib.pyplot as plt
-from models.utils_simgcd import DistillLoss  # 导入原始的DistillLoss
+import os
+
+
+def compute_energy_scores(model, images, temperature=1.0):
+    """
+    Compute energy scores for input images using the given model.
+
+    Energy(x) = -T * log(sum(exp(f(x)/T)))
+    Lower energy indicates higher confidence (seen class)
+    Higher energy indicates lower confidence (unseen class)
+
+    Args:
+        model: Pre-trained model from previous session
+        images: Input images tensor [B, C, H, W]
+        temperature: Temperature scaling parameter
+
+    Returns:
+        energy_scores: Energy scores for each image [B]
+    """
+    model.eval()
+    with torch.no_grad():
+        # Get logits from model
+        if hasattr(model, 'projector'):
+            # For PromptEnhancedModel or similar structure
+            _, logits = model(images)
+        else:
+            # For basic model
+            logits = model(images)
+
+        # Compute energy scores
+        # Energy = -T * log(sum(exp(logits/T)))
+        scaled_logits = logits / temperature
+        energy_scores = -temperature * torch.logsumexp(scaled_logits, dim=1)
+
+    return energy_scores.cpu().numpy()
+
+'''
+def visualize_energy_distribution(all_energy_scores, cluster_labels, separation_stats, save_path, logger=None):
+    """
+    Visualize the energy distribution of seen vs unseen samples after GMM clustering
+
+    Args:
+        all_energy_scores: Array of energy scores for all samples
+        cluster_labels: GMM cluster assignments (0 or 1)
+        separation_stats: Statistics from energy separation
+        save_path: Path to save the visualization
+        logger: Logger for info messages
+    """
+    try:
+        # Determine which cluster is seen vs unseen
+        cluster_0_mean = all_energy_scores[cluster_labels == 0].mean()
+        cluster_1_mean = all_energy_scores[cluster_labels == 1].mean()
+
+        if cluster_0_mean < cluster_1_mean:
+            seen_cluster, unseen_cluster = 0, 1
+        else:
+            seen_cluster, unseen_cluster = 1, 0
+
+        # Separate energy scores by cluster
+        seen_energies = all_energy_scores[cluster_labels == seen_cluster]
+        unseen_energies = all_energy_scores[cluster_labels == unseen_cluster]
+
+        # Create the plot
+        plt.figure(figsize=(12, 8))
+
+        # Plot histograms
+        plt.hist(seen_energies, bins=50, alpha=0.7, color='blue', label=f'Seen Samples (n={len(seen_energies)})',
+                 density=True)
+        plt.hist(unseen_energies, bins=50, alpha=0.7, color='red', label=f'Unseen Samples (n={len(unseen_energies)})',
+                 density=True)
+
+        # Add vertical lines for means
+        plt.axvline(seen_energies.mean(), color='blue', linestyle='--', linewidth=2,
+                    label=f'Seen Mean: {seen_energies.mean():.3f}')
+        plt.axvline(unseen_energies.mean(), color='red', linestyle='--', linewidth=2,
+                    label=f'Unseen Mean: {unseen_energies.mean():.3f}')
+
+        # Add statistics text box
+        stats_text = f"""Separation Statistics:
+Seen: μ={separation_stats['seen_energy_mean']:.3f}, σ={separation_stats['seen_energy_std']:.3f}
+Unseen: μ={separation_stats['unseen_energy_mean']:.3f}, σ={separation_stats['unseen_energy_std']:.3f}
+Separation Score: {separation_stats['energy_separation_score']:.3f}"""
+
+        plt.text(0.02, 0.98, stats_text, transform=plt.gca().transAxes, fontsize=10,
+                 verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+        # Formatting
+        plt.xlabel('Energy Score', fontsize=12)
+        plt.ylabel('Density', fontsize=12)
+        plt.title('Energy Distribution: Seen vs Unseen Samples after GMM Clustering', fontsize=14, fontweight='bold')
+        plt.legend(fontsize=11)
+        plt.grid(True, alpha=0.3)
+
+        # Save the plot
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+
+        if logger:
+            logger.info(f"Energy distribution visualization saved to: {save_path}")
+
+    except Exception as e:
+        if logger:
+            logger.error(f"Failed to create energy distribution visualization: {str(e)}")
+        else:
+            print(f"Error creating visualization: {str(e)}")
+'''
+
+
+def visualize_energy_distribution(all_energy_scores, cluster_labels, separation_stats, save_path, logger=None):
+    """
+    Visualize the energy distribution of seen vs unseen samples after GMM clustering using density plots
+
+    Args:
+        all_energy_scores: Array of energy scores for all samples
+        cluster_labels: GMM cluster assignments (0 or 1)
+        separation_stats: Statistics from energy separation
+        save_path: Path to save the visualization
+        logger: Logger for info messages
+    """
+    try:
+        import numpy as np
+        import matplotlib.pyplot as plt
+        from scipy.stats import gaussian_kde
+
+        # Determine which cluster is seen vs unseen
+        cluster_0_mean = all_energy_scores[cluster_labels == 0].mean()
+        cluster_1_mean = all_energy_scores[cluster_labels == 1].mean()
+
+        if cluster_0_mean < cluster_1_mean:
+            seen_cluster, unseen_cluster = 0, 1
+        else:
+            seen_cluster, unseen_cluster = 1, 0
+
+        # Separate energy scores by cluster
+        seen_energies = all_energy_scores[cluster_labels == seen_cluster]
+        unseen_energies = all_energy_scores[cluster_labels == unseen_cluster]
+
+        # Create the plot
+        plt.figure(figsize=(12, 8))
+
+        # Create density estimation
+        # Generate x range for smooth curves
+        x_min = min(all_energy_scores.min(), seen_energies.min(), unseen_energies.min())
+        x_max = max(all_energy_scores.max(), seen_energies.max(), unseen_energies.max())
+        x_range = np.linspace(x_min, x_max, 300)
+
+        # Calculate KDE for seen samples
+        if len(seen_energies) > 1:
+            seen_kde = gaussian_kde(seen_energies)
+            seen_density = seen_kde(x_range)
+        else:
+            seen_density = np.zeros_like(x_range)
+
+        # Calculate KDE for unseen samples
+        if len(unseen_energies) > 1:
+            unseen_kde = gaussian_kde(unseen_energies)
+            unseen_density = unseen_kde(x_range)
+        else:
+            unseen_density = np.zeros_like(x_range)
+
+        # Find the boundary between seen and unseen clusters
+        # Use the midpoint between the two means as the boundary
+        boundary = (seen_energies.mean() + unseen_energies.mean()) / 2
+
+        # Create masks for truncating density curves at the boundary
+        if seen_energies.mean() < unseen_energies.mean():
+            # Seen cluster has lower energy, truncate seen curve at boundary (right side)
+            # and unseen curve at boundary (left side)
+            seen_mask = x_range <= boundary
+            unseen_mask = x_range >= boundary
+        else:
+            # Seen cluster has higher energy, truncate seen curve at boundary (left side)
+            # and unseen curve at boundary (right side)
+            seen_mask = x_range >= boundary
+            unseen_mask = x_range <= boundary
+
+        # Apply masks to density curves and x_range
+        seen_x = x_range[seen_mask]
+        seen_density_truncated = seen_density[seen_mask]
+        unseen_x = x_range[unseen_mask]
+        unseen_density_truncated = unseen_density[unseen_mask]
+
+        # Plot truncated density curves with fill
+        plt.fill_between(seen_x, seen_density_truncated, alpha=0.6, color='blue',
+                         label=f'Seen Samples (n={len(seen_energies)})')
+        plt.fill_between(unseen_x, unseen_density_truncated, alpha=0.6, color='red',
+                         label=f'Unseen Samples (n={len(unseen_energies)})')
+
+        # Plot truncated density curves as lines for better visibility
+        plt.plot(seen_x, seen_density_truncated, color='blue', linewidth=2, alpha=0.9)
+        plt.plot(unseen_x, unseen_density_truncated, color='red', linewidth=2, alpha=0.9)
+
+        # Add boundary line
+        plt.axvline(boundary, color='black', linestyle=':', linewidth=2, alpha=0.8,
+                    label=f'Cluster Boundary: {boundary:.3f}')
+
+        # Add vertical lines for means
+        plt.axvline(seen_energies.mean(), color='blue', linestyle='--', linewidth=2,
+                    label=f'Seen Mean: {seen_energies.mean():.3f}', alpha=0.8)
+        plt.axvline(unseen_energies.mean(), color='red', linestyle='--', linewidth=2,
+                    label=f'Unseen Mean: {unseen_energies.mean():.3f}', alpha=0.8)
+
+        # Add statistics text box
+        stats_text = f"""Separation Statistics:
+Seen: μ={separation_stats['seen_energy_mean']:.3f}, σ={separation_stats['seen_energy_std']:.3f}
+Unseen: μ={separation_stats['unseen_energy_mean']:.3f}, σ={separation_stats['unseen_energy_std']:.3f}
+Separation Score: {separation_stats['energy_separation_score']:.3f}
+Cluster Boundary: {boundary:.3f}"""
+
+        plt.text(0.02, 0.98, stats_text, transform=plt.gca().transAxes, fontsize=10,
+                 verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+        # Formatting
+        plt.xlabel('Energy Score', fontsize=12)
+        plt.ylabel('Density', fontsize=12)
+        plt.title('Energy Distribution: Seen vs Unseen Samples after GMM Clustering', fontsize=14, fontweight='bold')
+        plt.legend(fontsize=11)
+        plt.grid(True, alpha=0.3)
+
+        # Save the plot
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+
+        if logger:
+            logger.info(f"Energy distribution visualization saved to: {save_path}")
+
+    except Exception as e:
+        if logger:
+            logger.error(f"Failed to create energy distribution visualization: {str(e)}")
+        else:
+            print(f"Error creating visualization: {str(e)}")
+
+def energy_based_sample_separation(model_prev, dataloader, args):
+    """
+    Separate samples into seen and unseen classes using energy-based method + GMM
+
+    Args:
+        model_prev: Model from previous session
+        dataloader: Current session dataloader
+        args: Arguments containing configuration
+
+    Returns:
+        seen_indices: Set of indices for seen samples
+        unseen_indices: Set of indices for unseen samples
+        separation_stats: Statistics about the separation
+    """
+    args.logger.info("Starting energy-based sample separation...")
+    args.logger.info("Expected data distribution:")
+    args.logger.info(f"  - Seen classes: {args.num_seen_classes} classes × 25 samples ≈ {args.num_seen_classes * 25} samples")
+    args.logger.info(f"  - Novel classes: {args.num_novel_class_per_session} classes × 400 samples = {args.num_novel_class_per_session * 400} samples")
+
+    model_prev.eval()
+
+    # Step 1: Compute energy scores for all samples
+    all_energy_scores = []
+    all_uq_indices = []
+    all_labels = []
+
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(tqdm(dataloader, desc="Computing energy scores")):
+            images, labels, uq_idxs, _ = batch
+            images = torch.cat(images, dim=0).cuda(non_blocking=True)
+
+            # 确保 uq_idxs 和 labels 的长度与 images 一致
+            uq_idxs = torch.cat([uq_idxs, uq_idxs], dim=0)
+            labels = torch.cat([labels, labels], dim=0)
+
+            # 计算能量分数
+            energy_scores = compute_energy_scores(model_prev, images, temperature=0.1) # Lower temp for better separation
+
+            all_energy_scores.extend(energy_scores)
+            all_uq_indices.extend(uq_idxs.numpy())
+            all_labels.extend(labels.numpy())
+
+    all_energy_scores = np.array(all_energy_scores)
+    all_uq_indices = np.array(all_uq_indices)
+    all_labels = np.array(all_labels)
+
+    args.logger.info(f"Computed energy scores for {len(all_energy_scores)} samples")
+    args.logger.info(f"Energy score range: [{all_energy_scores.min():.4f}, {all_energy_scores.max():.4f}]")
+
+    # Step 2: Calculate expected ratios
+    expected_seen_count = args.num_seen_classes * 25
+    expected_unseen_count = args.num_novel_class_per_session * 400
+    total_expected = expected_seen_count + expected_unseen_count
+    expected_seen_ratio = expected_seen_count / total_expected
+
+    args.logger.info(
+        f"Expected ratios: Seen={expected_seen_ratio:.3f} ({expected_seen_count}), Unseen={1 - expected_seen_ratio:.3f} ({expected_unseen_count})")
+
+    # Step 3: Use threshold-based separation instead of pure GMM
+    # Calculate threshold based on expected ratio
+    energy_threshold = np.percentile(all_energy_scores, expected_seen_ratio * 100)
+
+    # Apply threshold
+    threshold_seen_mask = all_energy_scores <= energy_threshold
+    threshold_unseen_mask = all_energy_scores > energy_threshold
+
+    threshold_seen_indices = set(all_uq_indices[threshold_seen_mask])
+    threshold_unseen_indices = set(all_uq_indices[threshold_unseen_mask])
+
+    args.logger.info(f"Threshold-based separation (threshold={energy_threshold:.4f}):")
+    args.logger.info(f"  - Seen: {len(threshold_seen_indices)} samples")
+    args.logger.info(f"  - Unseen: {len(threshold_unseen_indices)} samples")
+
+    # Step 4: Fit GMM on energy scores
+    args.logger.info("Fitting GMM on energy scores...")
+
+    # Reshape for sklearn
+    energy_features = all_energy_scores.reshape(-1, 1)
+
+    # Fit GMM with 2 components (seen vs unseen)
+    gmm = GaussianMixture(n_components=2, random_state=42, covariance_type='diag', max_iter=200, tol=1e-6)
+    gmm.fit(energy_features)
+
+    # Predict cluster assignments
+    cluster_labels = gmm.predict(energy_features)
+    cluster_probs = gmm.predict_proba(energy_features)
+
+    # Step 3: Determine which cluster corresponds to seen vs unseen
+    # Lower energy cluster should be "seen", higher energy cluster should be "unseen"
+    cluster_0_mean_energy = all_energy_scores[cluster_labels == 0].mean()
+    cluster_1_mean_energy = all_energy_scores[cluster_labels == 1].mean()
+
+    if cluster_0_mean_energy < cluster_1_mean_energy:
+        seen_cluster = 0
+        unseen_cluster = 1
+    else:
+        seen_cluster = 1
+        unseen_cluster = 0
+
+    gmm_boundary = (gmm.means_[0, 0] + gmm.means_[1, 0]) / 2
+
+    # Step 5: Adaptive threshold adjustment
+    # If we want more novel classes, shift threshold left (lower values)
+    # Base threshold on expected ratio, but allow adaptive adjustment
+
+    # Strategy 1: Use percentile directly (most aggressive for getting more novel classes)
+    adaptive_threshold = energy_threshold
+
+    # Strategy 2: If you want to be more conservative, blend with GMM boundary
+    # adaptive_threshold = 0.7 * energy_threshold + 0.3 * gmm_boundary
+
+    # Strategy 3: For maximum novel detection, shift threshold further left
+    threshold_shift = -0.004  # Shift left by 0.002 to get more novel classes
+    adaptive_threshold = energy_threshold + threshold_shift
+
+    args.logger.info(f"Threshold adjustment:")
+    args.logger.info(f"  - Original percentile threshold: {energy_threshold:.4f}")
+    args.logger.info(f"  - GMM boundary: {gmm_boundary:.4f}")
+    args.logger.info(f"  - Adaptive threshold (shifted): {adaptive_threshold:.4f}")
+
+    # Apply adaptive threshold
+    final_seen_mask = all_energy_scores <= adaptive_threshold
+    final_unseen_mask = all_energy_scores > adaptive_threshold
+
+    seen_indices = set(all_uq_indices[final_seen_mask])
+    unseen_indices = set(all_uq_indices[final_unseen_mask])
+
+    # Step 6: Compute separation statistics
+    seen_energy_mean = all_energy_scores[final_seen_mask].mean()
+    seen_energy_std = all_energy_scores[final_seen_mask].std()
+    unseen_energy_mean = all_energy_scores[final_unseen_mask].mean()
+    unseen_energy_std = all_energy_scores[final_unseen_mask].std()
+
+    # # Step 4: Get indices for seen and unseen samples
+    # seen_mask = cluster_labels == seen_cluster
+    # unseen_mask = cluster_labels == unseen_cluster
+    # seen_indices = set(all_uq_indices[seen_mask])
+    # unseen_indices = set(all_uq_indices[unseen_mask])
+
+    # # Step 5: Compute separation statistics
+    # seen_energy_mean = all_energy_scores[seen_mask].mean()
+    # seen_energy_std = all_energy_scores[seen_mask].std()
+    # unseen_energy_mean = all_energy_scores[unseen_mask].mean()
+    # unseen_energy_std = all_energy_scores[unseen_mask].std()
+
+    # Compute separation quality (larger is better)
+    energy_separation = abs(seen_energy_mean - unseen_energy_mean) / (seen_energy_std + unseen_energy_std)
+
+    # Check if separation aligns with expected distribution
+    actual_seen_ratio = len(seen_indices) / len(all_energy_scores)
+    actual_unseen_ratio = len(unseen_indices) / len(all_energy_scores)
+    ratio_difference = abs(actual_seen_ratio - expected_seen_ratio)
+
+    separation_stats = {
+        'num_seen': len(seen_indices),
+        'num_unseen': len(unseen_indices),
+        'seen_energy_mean': seen_energy_mean,
+        'seen_energy_std': seen_energy_std,
+        'unseen_energy_mean': unseen_energy_mean,
+        'unseen_energy_std': unseen_energy_std,
+        'energy_separation_score': energy_separation,
+        'expected_seen_ratio': expected_seen_ratio,
+        'actual_seen_ratio': actual_seen_ratio,
+        'actual_unseen_ratio': actual_unseen_ratio,
+        'ratio_difference': ratio_difference,
+        'original_threshold': energy_threshold,
+        'gmm_boundary': gmm_boundary,
+        'adaptive_threshold': adaptive_threshold,
+        'threshold_shift': threshold_shift,
+        'gmm_means': gmm.means_.flatten(),
+        'gmm_covariances': gmm.covariances_.flatten()
+    }
+
+    # Step 6: Create visualization
+    if hasattr(args, 'log_dir'):
+        # Try to determine current session number for naming
+        current_session = 1
+        if hasattr(args, 'num_seen_classes') and hasattr(args, 'num_labeled_classes') and hasattr(args,
+                                                                                                  'num_novel_class_per_session'):
+            if args.num_seen_classes > args.num_labeled_classes:
+                completed_sessions = (
+                                                 args.num_seen_classes - args.num_labeled_classes) // args.num_novel_class_per_session
+                current_session = completed_sessions + 1
+
+        # Create visualizations directory
+        vis_dir = os.path.join(args.log_dir, 'visualizations')
+        os.makedirs(vis_dir, exist_ok=True)
+
+        # Save energy distribution plot
+        energy_plot_path = os.path.join(vis_dir, f'energy_distribution_session_{current_session}.png')
+        visualize_energy_distribution(all_energy_scores, cluster_labels, separation_stats, energy_plot_path, args.logger)
+
+    # Log statistics
+    args.logger.info(f"Sample separation completed:")
+    args.logger.info(f"  Seen samples: {len(seen_indices)} (energy: {seen_energy_mean:.4f} ± {seen_energy_std:.4f})")
+    args.logger.info(f"  Unseen samples: {len(unseen_indices)} (energy: {unseen_energy_mean:.4f} ± {unseen_energy_std:.4f})")
+    args.logger.info(f"  Energy separation score: {energy_separation:.4f}")
+
+    # Success metrics
+    unseen_retrieval_rate = len(unseen_indices) / expected_unseen_count if expected_unseen_count > 0 else 0
+    args.logger.info(f"  Novel class retrieval rate: {unseen_retrieval_rate:.1%} ({len(unseen_indices)}/{expected_unseen_count})")
+
+    # Validate separation quality
+    if ratio_difference > 0.10:  # If difference > 10%
+        args.logger.warning(f"Energy separation may still need adjustment! Ratio difference: {ratio_difference:.3f}")
+    else:
+        args.logger.info("✓ Energy separation ratio looks good!")
+
+    if unseen_retrieval_rate > 0.95:  # If we got >95% of expected novel samples
+        args.logger.info("✓ Excellent novel class retrieval!")
+    elif unseen_retrieval_rate > 0.85:
+        args.logger.info("✓ Good novel class retrieval!")
+    else:
+        args.logger.warning(f"Low novel class retrieval rate: {unseen_retrieval_rate:.1%}")
+
+    return seen_indices, unseen_indices, separation_stats
+
+
+class EnhancedDistillLoss(nn.Module):
+    def __init__(self, warmup_teacher_temp_epochs, nepochs,
+                 ncrops=2, warmup_teacher_temp=0.07, teacher_temp=0.04,
+                 student_temp=0.1, sinkhorn=0.2):
+        super().__init__()
+        self.student_temp = student_temp
+        self.ncrops = ncrops
+        self.teacher_temp_schedule = np.concatenate((
+            np.linspace(warmup_teacher_temp,
+                        teacher_temp, warmup_teacher_temp_epochs),
+            np.ones(nepochs - warmup_teacher_temp_epochs) * teacher_temp
+        ))
+        self.sinkhorn = sinkhorn
+
+    def forward(self, student_output, teacher_output, epoch):
+        """
+        Cross-entropy between softmax outputs of the teacher and student networks.
+        """
+        student_out = student_output / self.student_temp
+        student_out = student_out.chunk(self.ncrops)
+
+        # teacher centering and sharpening
+        temp = self.teacher_temp_schedule[epoch]
+        sk = SinkhornKnopp()
+        alpha = self.sinkhorn
+        logits_sk = sk(teacher_output / temp)
+        teacher_out = F.softmax(teacher_output / temp, dim=-1)
+        teacher_out = (1 - alpha) * teacher_out + alpha * logits_sk
+        teacher_out = teacher_out.detach().chunk(2)
+
+        total_loss = 0
+        n_loss_terms = 0
+        for iq, q in enumerate(teacher_out):
+            for v in range(len(student_out)):
+                if v == iq:
+                    # we skip cases where student and teacher operate on the same view
+                    continue
+                loss = torch.sum(-q * F.log_softmax(student_out[v], dim=-1), dim=-1)
+                total_loss += loss.mean()
+                n_loss_terms += 1
+        total_loss /= n_loss_terms
+        return total_loss
 
 
 class SinkhornKnopp(torch.nn.Module):
-    """
-    Sinkhorn-Knopp算法实现，用于计算双随机矩阵
-    """
-
     def __init__(self, num_iters=3, epsilon=0.1):
         super().__init__()
         self.num_iters = num_iters
         self.epsilon = epsilon
+        self.iter = 0
 
     @torch.no_grad()
     def forward(self, logits):
@@ -41,373 +538,61 @@ class SinkhornKnopp(torch.nn.Module):
         return Q.t()
 
 
-class EnhancedDistillLoss(nn.Module):
+def compute_sample_type_loss(student_proj, student_out, teacher_out, sample_types,
+                             criterion_seen, criterion_unseen, epoch):
     """
-    增强版蒸馏损失，使用Sinkhorn-Knopp算法进行约束
-    """
-
-    def __init__(self, warmup_teacher_temp_epochs, nepochs,
-                 ncrops=2, warmup_teacher_temp=0.07, teacher_temp=0.04,
-                 student_temp=0.1, sinkhorn_weight=0.6):
-        super().__init__()
-        self.student_temp = student_temp
-        self.ncrops = ncrops
-        self.teacher_temp_schedule = np.concatenate((
-            np.linspace(warmup_teacher_temp,
-                        teacher_temp, warmup_teacher_temp_epochs),
-            np.ones(nepochs - warmup_teacher_temp_epochs) * teacher_temp
-        ))
-        self.sinkhorn_weight = sinkhorn_weight
-
-    def forward(self, student_output, teacher_output, epoch, num_iters=3, epsilon=0.05):
-        """
-        应用带有Sinkhorn-Knopp约束的蒸馏损失
-
-        Args:
-            student_output: 学生模型输出 [batch_size, num_classes]
-            teacher_output: 教师模型输出 [batch_size, num_classes]
-            epoch: 当前训练的epoch
-            num_iters: Sinkhorn-Knopp算法的迭代次数
-            epsilon: Sinkhorn-Knopp算法的正则化参数
-        """
-        # 处理学生输出
-        student_out = student_output / self.student_temp
-        student_out = student_out.chunk(self.ncrops)
-
-        # 教师模型调整和锐化
-        temp = self.teacher_temp_schedule[min(epoch, len(self.teacher_temp_schedule) - 1)]
-
-        # 创建Sinkhorn-Knopp算法实例
-        sk = SinkhornKnopp(num_iters=num_iters, epsilon=epsilon)
-
-        # 应用Sinkhorn-Knopp获取分配矩阵
-        logits_sk = sk(teacher_output / temp)
-
-        # 计算标准的softmax分布
-        teacher_out_softmax = F.softmax(teacher_output / temp, dim=-1)
-
-        # 融合softmax和Sinkhorn-Knopp结果
-        teacher_out = (1 - self.sinkhorn_weight) * teacher_out_softmax + self.sinkhorn_weight * logits_sk
-        teacher_out = teacher_out.detach().chunk(2)
-
-        # 计算蒸馏损失
-        total_loss = 0
-        n_loss_terms = 0
-        for iq, q in enumerate(teacher_out):
-            for v in range(len(student_out)):
-                if v == iq:
-                    # 跳过学生和教师在同一视图上操作的情况
-                    continue
-                loss = torch.sum(-q * F.log_softmax(student_out[v], dim=-1), dim=-1)
-                total_loss += loss.mean()
-                n_loss_terms += 1
-        total_loss /= n_loss_terms
-        return total_loss
-
-
-class EnergyBasedSplitter:
-    """
-    基于能量的样本分割器，用于区分可能的旧类和新类样本
-    """
-
-    def __init__(self, energy_temp=1.0, threshold=None, ratio=0.3, adapt_threshold=True,
-                 logger=None, device='cuda'):
-        """
-        初始化Energy-Based分割器
-
-        Args:
-            energy_temp: 计算能量时的温度参数
-            threshold: 能量阈值，高于此值的样本被视为新类
-            ratio: 当threshold为None时，能量最高的ratio比例的样本被视为新类
-            adapt_threshold: 是否在运行时自适应调整阈值
-            logger: 日志记录器
-            device: 计算设备
-        """
-        self.energy_temp = energy_temp
-        self.threshold = threshold
-        self.ratio = ratio
-        self.adapt_threshold = adapt_threshold
-        self.logger = logger
-        self.device = device
-        self.session_energy_stats = []
-
-    def compute_energy(self, logits):
-        """
-        计算样本的能量分数
-        低能量 -> 高置信度 -> 可能是old类
-        高能量 -> 低置信度 -> 可能是new类
-
-        Args:
-            logits: 模型输出的logits [batch_size, num_classes]
-
-        Returns:
-            energy: 每个样本的能量分数 [batch_size]
-        """
-        return -torch.logsumexp(logits / self.energy_temp, dim=1)
-
-    def split_batch_by_energy(self, student_out, teacher_out=None):
-        """
-        根据能量分数将批次样本分为old和new两部分
-
-        Args:
-            student_out: 学生模型输出的logits [batch_size, num_classes]
-            teacher_out: 教师模型输出，可选
-
-        Returns:
-            old_indices: old类样本的索引
-            new_indices: new类样本的索引
-            energy: 所有样本的能量分数
-        """
-        # 计算能量分数
-        energy = self.compute_energy(student_out)
-
-        # 确定阈值
-        current_threshold = self.threshold
-        if current_threshold is None or self.adapt_threshold:
-            # 根据ratio参数自动确定阈值
-            sorted_energy, _ = torch.sort(energy, descending=True)
-            threshold_idx = int(len(sorted_energy) * self.ratio)
-            current_threshold = sorted_energy[threshold_idx]
-
-            # 如果启用自适应阈值，更新类属性
-            if self.adapt_threshold:
-                self.threshold = current_threshold * 0.9 + (self.threshold or 0) * 0.1  # 平滑更新
-
-        # 大于阈值的被认为是new类样本（高能量）
-        new_mask = energy > current_threshold
-        old_mask = ~new_mask
-
-        old_indices = torch.where(old_mask)[0]
-        new_indices = torch.where(new_mask)[0]
-
-        # 记录统计信息
-        self.session_energy_stats.append({
-            'mean_energy': energy.mean().item(),
-            'min_energy': energy.min().item(),
-            'max_energy': energy.max().item(),
-            'threshold': current_threshold,
-            'old_ratio': len(old_indices) / len(energy),
-            'new_ratio': len(new_indices) / len(energy)
-        })
-
-        return old_indices, new_indices, energy
-
-    def split_dataset_by_energy(self, model, data_loader, num_seen_classes):
-        """
-        预处理整个数据集，计算能量并将其分为old和new两部分
-
-        Args:
-            model: 当前模型(或上一个session的模型)
-            data_loader: 数据加载器
-            num_seen_classes: 已知类别的数量
-
-        Returns:
-            old_indices_dataset: old类样本在数据集中的索引
-            new_indices_dataset: new类样本在数据集中的索引
-            energy_scores: 所有样本的能量分数
-        """
-        model.eval()
-        all_energies = []
-        all_preds = []
-        all_indices = []
-
-        if self.logger:
-            self.logger.info("计算整个数据集的能量分数，区分old和new类...")
-
-        with torch.no_grad():
-            for batch_idx, batch in enumerate(tqdm(data_loader, desc="Computing energy scores")):
-                # 获取图像和索引
-                if len(batch) >= 3:
-                    images, _, indices = batch[:3]
-                    if isinstance(images, list):  # 对比学习中常见的多视图输入
-                        images = images[0]
-                else:
-                    continue  # 跳过格式不正确的批次
-
-                images = images.to(self.device)
-
-                # 获取模型输出
-                _, logits = model(images)
-
-                # 计算能量
-                energy = self.compute_energy(logits)
-
-                # 保存结果
-                all_energies.append(energy.cpu())
-                all_preds.append(logits.argmax(1).cpu())
-                all_indices.append(indices)
-
-        all_energies = torch.cat(all_energies)
-        all_preds = torch.cat(all_preds)
-        all_indices = torch.cat(all_indices)
-
-        # 统计预测类别分布
-        pred_old = (all_preds < num_seen_classes).sum().item()
-        pred_new = (all_preds >= num_seen_classes).sum().item()
-
-        if self.logger:
-            self.logger.info(f"模型预测: {pred_old} 个样本属于old类, {pred_new} 个样本属于new类")
-            self.logger.info(
-                f"能量统计: 平均={all_energies.mean().item():.4f}, 最小={all_energies.min().item():.4f}, 最大={all_energies.max().item():.4f}")
-
-        # 使用能量分数区分old和new
-        if self.threshold is None:
-            # 根据ratio参数自动确定阈值
-            sorted_energy, _ = torch.sort(all_energies, descending=True)
-            threshold_idx = int(len(sorted_energy) * self.ratio)
-            self.threshold = sorted_energy[threshold_idx].item()
-
-            if self.logger:
-                self.logger.info(
-                    f"自动确定能量阈值: {self.threshold:.4f} (选取能量最高的{self.ratio * 100:.1f}%样本作为new类)")
-
-        # 大于阈值的被认为是new类样本（高能量）
-        new_mask = all_energies > self.threshold
-        old_mask = ~new_mask
-
-        old_indices_dataset = all_indices[old_mask].numpy()
-        new_indices_dataset = all_indices[new_mask].numpy()
-
-        if self.logger:
-            self.logger.info(
-                f"能量分割结果: {len(old_indices_dataset)} 个样本归为old类, {len(new_indices_dataset)} 个样本归为new类")
-
-            # 计算能量分割与模型预测的一致性
-            old_correct = ((all_preds < num_seen_classes) & old_mask).sum().item()
-            new_correct = ((all_preds >= num_seen_classes) & new_mask).sum().item()
-            agreement = (old_correct + new_correct) / len(all_indices)
-            self.logger.info(f"能量分割与模型预测的一致性: {agreement * 100:.2f}%")
-
-        return old_indices_dataset, new_indices_dataset, all_energies.numpy()
-
-    def visualize_energy_distribution(self, energy, save_path=None):
-        """
-        可视化能量分布，帮助分析能量阈值的选择
-
-        Args:
-            energy: 样本的能量分数
-            save_path: 保存图像的路径
-        """
-        if self.logger:
-            self.logger.info("生成能量分布图...")
-
-        import matplotlib.pyplot as plt
-        import seaborn as sns
-
-        if not isinstance(energy, np.ndarray):
-            energy = energy.cpu().numpy()
-
-        # 创建图形
-        plt.figure(figsize=(10, 6))
-
-        # 绘制能量分布直方图
-        sns.histplot(energy, bins=50, kde=True)
-
-        # 如果有阈值，绘制阈值线
-        if self.threshold is not None:
-            plt.axvline(x=self.threshold, color='red', linestyle='--',
-                        label=f'Threshold: {self.threshold:.4f}')
-
-            # 计算划分比例
-            high_energy = np.sum(energy > self.threshold)
-            low_energy = np.sum(energy <= self.threshold)
-            high_ratio = high_energy / len(energy) * 100
-            low_ratio = low_energy / len(energy) * 100
-
-            # 添加文本标注
-            plt.text(0.05, 0.95, f"Low Energy (Old): {low_ratio:.1f}%\nHigh Energy (New): {high_ratio:.1f}%",
-                     transform=plt.gca().transAxes, fontsize=12,
-                     verticalalignment='top', bbox=dict(boxstyle='round', alpha=0.1))
-
-        plt.title('Energy Distribution', fontsize=14)
-        plt.xlabel('Energy Score', fontsize=12)
-        plt.ylabel('Count', fontsize=12)
-        plt.grid(True, alpha=0.3)
-        plt.legend()
-
-        # 保存图像
-        if save_path is not None:
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            plt.savefig(save_path)
-            if self.logger:
-                self.logger.info(f"能量分布图已保存至: {save_path}")
-
-        plt.close()
-
-
-def apply_dual_distill_losses(student_out, teacher_out, epoch,
-                              original_distill_loss, enhanced_distill_loss,
-                              energy_splitter):
-    """
-    基于能量分割，分别对old和new样本应用不同的蒸馏损失
+    Compute loss based on sample types (seen vs unseen)
 
     Args:
-        student_out: 学生模型输出 [batch_size, num_classes]
-        teacher_out: 教师模型输出 [batch_size, num_classes]
-        epoch: 当前训练的epoch
-        original_distill_loss: 原始蒸馏损失函数对象(DistillLoss实例)
-        enhanced_distill_loss: 增强蒸馏损失函数对象(EnhancedDistillLoss实例)
-        energy_splitter: EnergyBasedSplitter实例
+        student_proj: Student projection features
+        student_out: Student output logits
+        teacher_out: Teacher output logits  
+        sample_types: List of sample types ('seen' or 'unseen')
+        criterion_seen: DistillLoss for seen samples
+        criterion_unseen: EnhancedDistillLoss for unseen samples
+        epoch: Current epoch
 
     Returns:
-        total_loss: 组合的蒸馏损失
-        metrics: 包含分割和损失信息的字典
+        total_loss: Combined loss
+        loss_info: Dictionary with loss components
     """
-    # 分割样本
-    old_indices, new_indices, energy = energy_splitter.split_batch_by_energy(student_out)
+    device = student_out.device
 
-    # 计算样本数量
-    total_samples = len(student_out)
-    num_old = len(old_indices)
-    num_new = len(new_indices)
+    # Convert sample_types to masks
+    seen_mask = torch.tensor([t == 'seen' for t in sample_types], device=device)
+    unseen_mask = torch.tensor([t == 'unseen' for t in sample_types], device=device)
 
-    # 如果全部是old或全部是new
-    if num_old == 0:
-        # 全部是new类
-        loss = enhanced_distill_loss(student_out, teacher_out, epoch)
-        return loss, {
-            'old_samples': 0,
-            'new_samples': total_samples,
-            'old_ratio': 0.0,
-            'new_ratio': 1.0,
-            'mean_energy': energy.mean().item(),
-            'is_mixed_batch': False
-        }
-    elif num_new == 0:
-        # 全部是old类
-        loss = original_distill_loss(student_out, teacher_out, epoch)
-        return loss, {
-            'old_samples': total_samples,
-            'new_samples': 0,
-            'old_ratio': 1.0,
-            'new_ratio': 0.0,
-            'mean_energy': energy.mean().item(),
-            'is_mixed_batch': False
-        }
+    total_loss = 0
+    loss_info = {}
 
-    # 分离old和new样本
-    old_student_out = student_out[old_indices]
-    old_teacher_out = teacher_out[old_indices]
-    new_student_out = student_out[new_indices]
-    new_teacher_out = teacher_out[new_indices]
+    # Process seen samples
+    if seen_mask.any():
+        # Get seen samples (both views)
+        seen_indices = torch.where(seen_mask)[0]
+        seen_student_out = student_out.chunk(2)
+        seen_teacher_out = teacher_out.chunk(2)
 
-    # 分别计算损失
-    old_loss = original_distill_loss(old_student_out, old_teacher_out, epoch)
-    new_loss = enhanced_distill_loss(new_student_out, new_teacher_out, epoch)
+        seen_student_combined = torch.cat([chunk[seen_indices] for chunk in seen_student_out], dim=0)
+        seen_teacher_combined = torch.cat([chunk[seen_indices] for chunk in seen_teacher_out], dim=0)
 
-    # 计算加权总损失
-    old_weight = num_old / total_samples
-    new_weight = num_new / total_samples
-    total_loss = old_weight * old_loss + new_weight * new_loss
+        if len(seen_student_combined) > 0:
+            seen_loss = criterion_seen(seen_student_combined, seen_teacher_combined, epoch)
+            total_loss += seen_loss
+            loss_info['seen_loss'] = seen_loss.item()
 
-    return total_loss, {
-        'old_samples': num_old,
-        'new_samples': num_new,
-        'old_ratio': old_weight,
-        'new_ratio': new_weight,
-        'old_loss': old_loss.item(),
-        'new_loss': new_loss.item(),
-        'mean_energy': energy.mean().item(),
-        'energy_threshold': energy_splitter.threshold,
-        'is_mixed_batch': True
-    }
+    # Process unseen samples  
+    if unseen_mask.any():
+        # Get unseen samples (both views)
+        unseen_indices = torch.where(unseen_mask)[0]
+        unseen_student_out = student_out.chunk(2)
+        unseen_teacher_out = teacher_out.chunk(2)
+
+        unseen_student_combined = torch.cat([chunk[unseen_indices] for chunk in unseen_student_out], dim=0)
+        unseen_teacher_combined = torch.cat([chunk[unseen_indices] for chunk in unseen_teacher_out], dim=0)
+
+        if len(unseen_student_combined) > 0:
+            unseen_loss = criterion_unseen(unseen_student_combined, unseen_teacher_combined, epoch)
+            total_loss += unseen_loss
+            loss_info['unseen_loss'] = unseen_loss.item()
+
+    return total_loss, loss_info
