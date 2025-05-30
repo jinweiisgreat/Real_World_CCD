@@ -39,13 +39,12 @@ from collections import Counter
 from models.utils_prompt_pool import PromptPool
 from models.prompt_enhanced_model import PromptEnhancedModel
 from models.utils_prompt_pool import visualize_graph_network
-# imort Energy method
-from models.utils_split_novel import energy_based_sample_separation, EnhancedDistillLoss, compute_sample_type_loss
-
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
+import setproctitle
+setproctitle.setproctitle("xiao wei's python process")
 
 '''offline train and test'''
 '''====================================================================================================================='''
@@ -270,42 +269,16 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
     )
 
     # ====================================================================
-    # ENERGY-BASED SAMPLE SEPARATION (Before Training)
-    # ====================================================================
-    args.logger.info("=" * 60)
-    args.logger.info("ENERGY-BASED SAMPLE SEPARATION")
-    args.logger.info("=" * 60)
-
-    seen_indices, unseen_indices, separation_stats = energy_based_sample_separation(
-        student_pre, train_loader, args
-    )
-
-    # Save separation statistics
-    separation_stats_path = os.path.join(args.model_dir, f'energy_separation_session_{current_session}.pt')
-    torch.save(separation_stats, separation_stats_path)
-    args.logger.info(f"Energy separation stats saved to {separation_stats_path}")
-
-    # ====================================================================
     # LOSS CRITERIA SETUP
     # ====================================================================
 
     # Standard DistillLoss for seen samples
-    cluster_criterion_seen = DistillLoss(
+    cluster_criterion = DistillLoss(
         args.warmup_teacher_temp_epochs,
         args.epochs_online_per_session,
         args.n_views,
         args.warmup_teacher_temp,
         args.teacher_temp,
-    )
-
-    # Enhanced DistillLoss with Sinkhorn-Knopp for unseen samples
-    cluster_criterion_unseen = EnhancedDistillLoss(
-                                args.warmup_teacher_temp_epochs,
-                                args.epochs_online_per_session,
-                                args.n_views,
-                                args.warmup_teacher_temp,
-                                args.teacher_temp,
-                                sinkhorn=0.2
     )
 
     # best acc log
@@ -335,35 +308,11 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
 
             class_labels, mask_lab = class_labels.cuda(non_blocking=True), mask_lab.cuda(non_blocking=True).bool()
             images = torch.cat(images, dim=0).cuda(non_blocking=True)
-
-            # ================================================================
-            # DETERMINE SAMPLE TYPES BASED ON ENERGY SEPARATION
-            # ================================================================
-            sample_types = []
-            for uq_idx in uq_idxs:
-                if uq_idx.item() in seen_indices:
-                    sample_types.append('seen')
-                elif uq_idx.item() in unseen_indices:
-                    sample_types.append('unseen')
-                else:
-                    sample_types.append('uncertain')  # Fallback for edge cases
-
-            # Handle uncertain samples (assign to unseen for exploration)
-            sample_types = ['unseen' if t == 'uncertain' else t for t in sample_types]
-
             student_proj, student_out = student(images)
             teacher_out = student_out.detach()
 
-            # ================================================================
-            # CLUSTERING LOSS (ENERGY-BASED SEPARATION)
-            # ================================================================
-            cluster_loss, cluster_loss_info = compute_sample_type_loss(
-                student_proj, student_out, teacher_out, sample_types,
-                cluster_criterion_seen, cluster_criterion_unseen, epoch
-            )
-
             # clustering, unsup
-            # cluster_loss = cluster_criterion(student_out, teacher_out, epoch)
+            cluster_loss = cluster_criterion(student_out, teacher_out, epoch)
 
             # ================================================================
             # ENTROPY REGULARIZATION (GROUP-WISE)
@@ -446,12 +395,6 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             if batch_idx % args.print_freq == 0:
                 args.logger.info('Epoch: [{}][{}/{}]\t loss {:.5f}\t {}'
                                  .format(epoch, batch_idx, len(train_loader), loss.item(), pstr))
-
-                # Additional energy-based statistics
-                seen_count = sum(1 for t in sample_types if t == 'seen')
-                unseen_count = sum(1 for t in sample_types if t == 'unseen')
-                args.logger.info(f'Batch composition: Seen: {seen_count}, Unseen: {unseen_count}')
-
                 new_true_ratio = len(class_labels[class_labels >= args.num_seen_classes]) / len(class_labels)
                 logits = student_out / 0.1
                 preds = logits.argmax(1)
