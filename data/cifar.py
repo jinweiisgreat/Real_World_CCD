@@ -169,6 +169,7 @@ def get_cifar_10_datasets(train_transform, test_transform, config_dict, train_cl
                                           for samples in each_old_unlabeled_samples]
         online_session_old_samples = [subsample_dataset(deepcopy(samples), online_session_each_old_slices[i])
                                       for i, samples in enumerate(each_old_unlabeled_samples)]
+
         online_session_old_dataset = subDataset_wholeDataset(online_session_old_samples) # [1750,1750,1750] 250*7=1750
         online_old_dataset_unlabelled_list.append(online_session_old_dataset)
 
@@ -207,8 +208,6 @@ def get_cifar_10_datasets(train_transform, test_transform, config_dict, train_cl
 
         online_session_novel_dataset = subDataset_wholeDataset(online_session_novel_samples) # [4000,4250,4500] 4000;4000+1*250;4000+2*250
         online_novel_dataset_unlabelled_list.append(online_session_novel_dataset)
-
-        print("online_novel_dataset_unlabelled_list", online_novel_dataset_unlabelled_list)
 
         # online session test dataset
         online_session_test_dataset = subsample_classes(
@@ -341,7 +340,7 @@ def get_cifar_100_datasets(train_transform, test_transform, config_dict, train_c
 
     return all_datasets, novel_targets_shuffle
 
-
+"""# Example usage
 if __name__ == '__main__':
     import torchvision.transforms as transforms
 
@@ -360,4 +359,4 @@ if __name__ == '__main__':
     print(Counter(cifar100_dataset.targets))
 
     print(cifar100_dataset)
-
+"""
