@@ -605,7 +605,8 @@ class PromptPool:
                 prompt_contribution += weight * self.prompts[prompt_idx]
 
             # Combine original feature with prompt contribution
-            enhanced_features[i] = features[i] + 0.5 * prompt_contribution
+            enhanced_features[i] = 0.8 * features[i] + 0.2 * prompt_contribution
+
 
         # Normalize the enhanced features
         enhanced_features = F.normalize(enhanced_features, dim=1)

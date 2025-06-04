@@ -1,10 +1,14 @@
 """
-Modify：添加 Prompt Pool 类
+Modify：添加 Prompt Pool 类 + Prompt训练机制
 date:   2025/05/12
 author: Wei Jin
 
-update: prompt pool update
+update: prompt pool update + prompt training
 date:   2025/05/16
+author: Wei Jin
+
+update: + prompt training
+date:   2025/06/02
 author: Wei Jin
 """
 
@@ -14,10 +18,10 @@ import math
 from tqdm import tqdm
 from copy import deepcopy
 
-
 import numpy as np
 from torch.utils.data import DataLoader
 import torch
+
 torch.autograd.set_detect_anomaly(True)
 
 import torch.nn as nn
@@ -30,51 +34,83 @@ from data.augmentations import get_transform
 from data.get_datasets import get_class_splits, ContrastiveLearningViewGenerator, get_datasets
 
 from models.utils_simgcd import DINOHead, get_params_groups, SupConLoss, info_nce_logits, DistillLoss
-from models.utils_simgcd_pro_prompt import get_kmeans_centroid_for_new_head
-from models.utils_proto_aug_prompt import ProtoAugManager
+from models.utils_simgcd_pro_prompt_trainable import get_kmeans_centroid_for_new_head
+from models.utils_proto_aug_prompt_trainable import ProtoAugManager
 from models import vision_transformer as vits
 from config import dino_pretrain_path, exp_root
 from collections import Counter
-# import PromptPool
-from models.utils_prompt_pool import PromptPool
-from models.prompt_enhanced_model import PromptEnhancedModel
-from models.utils_prompt_pool import visualize_graph_network
+# import Enhanced PromptPool and Model
+from models.utils_prompt_pool_trainable import LearnablePromptPool, visualize_graph_network
+from models.prompt_enhanced_model_trainable import PromptEnhancedModel
 import warnings
+
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 import setproctitle
+
 setproctitle.setproctitle("xiao wei's python process")
 
 '''offline train and test'''
 '''====================================================================================================================='''
+
+
 def train_offline(student, train_loader, test_loader, args):
     # 确认使用的是PromptEnhancedModel
     assert isinstance(student, PromptEnhancedModel), f"Expected PromptEnhancedModel but got {type(student)}"
 
+    # 获取所有需要优化的参数（包括prompt parameters）
+    model_params = list(student.backbone.parameters()) + list(student.projector.parameters())
+    prompt_params = student.get_prompt_parameters()
+
+    if prompt_params:
+        args.logger.info(f"Found {len(prompt_params)} prompt parameters to optimize")
+        all_params = model_params + prompt_params
+    else:
+        all_params = model_params
+        args.logger.info("No prompt parameters found, using only model parameters")
+
+    # 使用分组参数策略
     params_groups = get_params_groups(student)
+
+    # 如果有prompt参数，单独添加到优化器
+    if prompt_params:
+        # prompt参数使用较小的学习率
+        prompt_lr = args.lr * 0.1  # prompt学习率设为主学习率的0.1倍
+        params_groups.append({
+            'params': prompt_params,
+            'lr': prompt_lr,
+            'weight_decay': 0.0  # prompt不使用weight decay
+        })
+        args.logger.info(f"Added prompt parameters with lr={prompt_lr}")
+
     optimizer = SGD(params_groups, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
 
     exp_lr_scheduler = lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=args.epochs_offline,
-            eta_min=args.lr * 1e-3,
-        )
+        optimizer,
+        T_max=args.epochs_offline,
+        eta_min=args.lr * 1e-3,
+    )
 
     cluster_criterion = DistillLoss(
-                        args.warmup_teacher_temp_epochs,
-                        args.epochs_offline,
-                        args.n_views,
-                        args.warmup_teacher_temp,
-                        args.teacher_temp,
-                    )
+        args.warmup_teacher_temp_epochs,
+        args.epochs_offline,
+        args.n_views,
+        args.warmup_teacher_temp,
+        args.teacher_temp,
+    )
     # best acc log
     best_test_acc_old = 0
 
     for epoch in range(args.epochs_offline):
         loss_record = AverageMeter()
+        prompt_loss_record = AverageMeter()
 
         student.train()
+        # 启用prompt学习（如果有prompt pool）
+        if student.prompt_pool is not None:
+            student.enable_prompt_learning()
+
         for batch_idx, batch in enumerate(train_loader):
             images, class_labels, uq_idxs = batch
             mask_lab = torch.ones_like(class_labels)  # all samples are labeled
@@ -82,7 +118,8 @@ def train_offline(student, train_loader, test_loader, args):
             class_labels, mask_lab = class_labels.cuda(non_blocking=True), mask_lab.cuda(non_blocking=True).bool()
             images = torch.cat(images, dim=0).cuda(non_blocking=True)
 
-            student_proj, student_out = student(images)
+            # 使用新的forward方法，同时计算prompt losses
+            student_proj, student_out, prompt_losses = student.forward_with_prompt_loss(images, class_labels)
             teacher_out = student_out.detach()
 
             # clustering, sup
@@ -93,7 +130,7 @@ def train_offline(student, train_loader, test_loader, args):
             # clustering, unsup: SimGCD Eq.(4)
             cluster_loss = cluster_criterion(student_out, teacher_out, epoch)
             avg_probs = (student_out / 0.1).softmax(dim=1).mean(dim=0)
-            me_max_loss = - torch.sum(torch.log(avg_probs**(-avg_probs))) + math.log(float(len(avg_probs)))
+            me_max_loss = - torch.sum(torch.log(avg_probs ** (-avg_probs))) + math.log(float(len(avg_probs)))
             cluster_loss += args.memax_weight * me_max_loss
 
             # represent learning, unsup: SimGCD Eq.(1)
@@ -107,10 +144,16 @@ def train_offline(student, train_loader, test_loader, args):
             sup_con_labels = class_labels[mask_lab]
             sup_con_loss = SupConLoss()(student_proj, labels=sup_con_labels)
 
+            # Main task losses
+            main_loss = (1 - args.sup_weight) * cluster_loss + args.sup_weight * cls_loss
+            main_loss += (1 - args.sup_weight) * contrastive_loss + args.sup_weight * sup_con_loss
+
+            # Prompt losses (渐进式增加权重)
+            prompt_weight = min(1.0, epoch / (args.epochs_offline * 0.3))  # 前30%的epochs渐进增加
+            total_prompt_loss = prompt_weight * prompt_losses['total']
+
             # Total loss
-            loss = 0
-            loss += (1 - args.sup_weight) * cluster_loss + args.sup_weight * cls_loss
-            loss += (1 - args.sup_weight) * contrastive_loss + args.sup_weight * sup_con_loss
+            loss = main_loss + total_prompt_loss
 
             # logs
             pstr = ''
@@ -118,17 +161,26 @@ def train_offline(student, train_loader, test_loader, args):
             pstr += f'cluster_loss: {cluster_loss.item():.4f} '
             pstr += f'sup_con_loss: {sup_con_loss.item():.4f} '
             pstr += f'contrastive_loss: {contrastive_loss.item():.4f} '
+            pstr += f'prompt_loss: {total_prompt_loss.item():.4f} '
 
             loss_record.update(loss.item(), class_labels.size(0))
+            prompt_loss_record.update(total_prompt_loss.item(), class_labels.size(0))
+
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
             if batch_idx % args.print_freq == 0:
                 args.logger.info('Epoch: [{}][{}/{}]\t loss {:.5f}\t {}'
-                            .format(epoch, batch_idx, len(train_loader), loss.item(), pstr))
+                                 .format(epoch, batch_idx, len(train_loader), loss.item(), pstr))
 
-        args.logger.info('Train Epoch: {} Avg Loss: {:.4f} '.format(epoch, loss_record.avg))
+        args.logger.info('Train Epoch: {} Avg Loss: {:.4f} Prompt Loss: {:.4f}'.format(
+            epoch, loss_record.avg, prompt_loss_record.avg))
+
+        # 记录prompt pool信息
+        if student.prompt_pool is not None:
+            prompt_info = student.prompt_pool_summary()
+            args.logger.info(f'Prompt Pool: {prompt_info}')
 
         args.logger.info('Testing on disjoint test set...')
         all_acc_test, old_acc_test, _ = test_offline(student, test_loader, epoch=epoch, save_name='Test ACC', args=args)
@@ -226,10 +278,9 @@ def test_offline(model, test_loader, epoch, save_name, args):
                                                     args=args)
 
     return all_acc, old_acc, new_acc
+
+
 '''====================================================================================================================='''
-
-
-
 
 '''online train and test'''
 '''====================================================================================================================='''
@@ -250,7 +301,7 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             prompt_pool_path = os.path.join(offline_model_dir, 'prompt_pool.pt')
         else:
             # 后续会话使用上一个会话更新后的 Prompt Pool
-            prompt_pool_path = os.path.join(args.model_dir, f'prompt_pool_session_{current_session-1}.pt')
+            prompt_pool_path = os.path.join(args.model_dir, f'prompt_pool_session_{current_session - 1}.pt')
 
         if os.path.exists(prompt_pool_path):
             args.logger.info(f"Loading prompt pool from {prompt_pool_path}")
@@ -259,7 +310,29 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
         else:
             args.logger.warning(f"Prompt pool not found at {prompt_pool_path}")
 
+    # 获取所有需要优化的参数（包括prompt parameters）
+    model_params = list(student.backbone.parameters()) + list(student.projector.parameters())
+    prompt_params = student.get_prompt_parameters()
+
+    if prompt_params:
+        args.logger.info(f"Found {len(prompt_params)} prompt parameters to optimize")
+    else:
+        args.logger.info("No prompt parameters found, using only model parameters")
+
+    # 使用分组参数策略
     params_groups = get_params_groups(student)
+
+    # 如果有prompt参数，单独添加到优化器
+    if prompt_params:
+        # online阶段prompt学习率可以稍高一些
+        prompt_lr = args.lr * 0.5
+        params_groups.append({
+            'params': prompt_params,
+            'lr': prompt_lr,
+            'weight_decay': 0.0
+        })
+        args.logger.info(f"Added prompt parameters with lr={prompt_lr}")
+
     optimizer = SGD(params_groups, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
 
     exp_lr_scheduler = lr_scheduler.CosineAnnealingLR(
@@ -295,11 +368,14 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
 
     for epoch in range(args.epochs_online_per_session):
         loss_record = AverageMeter()
-        seen_loss_record = AverageMeter()
-        unseen_loss_record = AverageMeter()
+        prompt_loss_record = AverageMeter()
 
         student.train()
         student_pre.eval()
+
+        # 启用prompt学习
+        if student.prompt_pool is not None:
+            student.enable_prompt_learning()
 
         for batch_idx, batch in enumerate(train_loader):
 
@@ -308,7 +384,9 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
 
             class_labels, mask_lab = class_labels.cuda(non_blocking=True), mask_lab.cuda(non_blocking=True).bool()
             images = torch.cat(images, dim=0).cuda(non_blocking=True)
-            student_proj, student_out = student(images)
+
+            # 使用新的forward方法，同时计算prompt losses
+            student_proj, student_out, prompt_losses = student.forward_with_prompt_loss(images, class_labels)
             teacher_out = student_out.detach()
 
             # clustering, unsup
@@ -362,12 +440,18 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
 
             feat_distill_loss = (feats - feats_pre).pow(2).sum() / len(feats)
 
+            # ================================================================
+            # PROMPT LOSSES (动态权重)
+            # ================================================================
+            # 在online阶段，prompt学习权重可以更高一些
+            prompt_weight = min(1.0, (epoch + 1) / (args.epochs_online_per_session * 0.2))  # 前20%epochs渐进增加
+            total_prompt_loss = prompt_weight * prompt_losses['total']
+
             # Total loss
-            loss = 0
-            loss += 1 * cluster_loss
-            loss += 1 * contrastive_loss
-            loss += args.proto_aug_weight * proto_aug_loss
-            loss += args.feat_distill_weight * feat_distill_loss
+            main_loss = 1 * cluster_loss + 1 * contrastive_loss
+            main_loss += args.proto_aug_weight * proto_aug_loss + args.feat_distill_weight * feat_distill_loss
+
+            loss = main_loss + total_prompt_loss
 
             # ================================================================
             # LOGGING
@@ -380,8 +464,11 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             pstr += f'contrastive_loss: {contrastive_loss.item():.4f} '
             pstr += f'proto_aug_loss: {proto_aug_loss.item():.4f} '
             pstr += f'feat_distill_loss: {feat_distill_loss.item():.4f} '
+            pstr += f'prompt_loss: {total_prompt_loss.item():.4f} '
 
             loss_record.update(loss.item(), class_labels.size(0))
+            prompt_loss_record.update(total_prompt_loss.item(), class_labels.size(0))
+
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -396,23 +483,28 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
                 args.logger.info(
                     f'Avg old prob: {torch.sum(avg_probs_old_in).item():.4f} | Avg new prob: {torch.sum(avg_probs_new_in).item():.4f} | Pred new ratio: {new_pred_ratio:.4f} | Ground-truth new ratio: {new_true_ratio:.4f}')
 
-        # args.logger.info('Train Epoch: {} Avg Loss: {:.4f} '.format(epoch, loss_record.avg))
-
         # ================================================================
         # EPOCH SUMMARY
         # ================================================================
-        epoch_summary = f'Train Epoch: {epoch} Avg Loss: {loss_record.avg:.4f}'
-        if seen_loss_record.count > 0:
-            epoch_summary += f' | Seen Loss: {seen_loss_record.avg:.4f}'
-        if unseen_loss_record.count > 0:
-            epoch_summary += f' | Unseen Loss: {unseen_loss_record.avg:.4f}'
-        args.logger.info(epoch_summary)
+        args.logger.info('Train Epoch: {} Avg Loss: {:.4f} Prompt Loss: {:.4f}'.format(
+            epoch, loss_record.avg, prompt_loss_record.avg))
+
+        # 记录prompt pool信息
+        if student.prompt_pool is not None:
+            prompt_info = student.prompt_pool_summary()
+            args.logger.info(f'Prompt Pool: {prompt_info}')
 
         args.logger.info('Testing on disjoint test set...')
         all_acc_test, old_acc_test, new_acc_test, \
-            all_acc_soft_test, seen_acc_test, unseen_acc_test = test_online(student, test_loader, epoch=epoch, save_name='Test ACC', current_session=current_session, args=args)
-        args.logger.info('Test Accuracies (Hard): All {:.4f} | Old {:.4f} | New {:.4f}'.format(all_acc_test, old_acc_test, new_acc_test))
-        args.logger.info('Test Accuracies (Soft): All {:.4f} | Seen {:.4f} | Unseen {:.4f}'.format(all_acc_soft_test, seen_acc_test, unseen_acc_test))
+            all_acc_soft_test, seen_acc_test, unseen_acc_test = test_online(student, test_loader, epoch=epoch,
+                                                                            save_name='Test ACC',
+                                                                            current_session=current_session, args=args)
+        args.logger.info(
+            'Test Accuracies (Hard): All {:.4f} | Old {:.4f} | New {:.4f}'.format(all_acc_test, old_acc_test,
+                                                                                  new_acc_test))
+        args.logger.info(
+            'Test Accuracies (Soft): All {:.4f} | Seen {:.4f} | Unseen {:.4f}'.format(all_acc_soft_test, seen_acc_test,
+                                                                                      unseen_acc_test))
 
         # Step schedule
         exp_lr_scheduler.step()
@@ -490,10 +582,10 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
                 args.logger.info(f"Loaded best model for prompt pool update from {best_model_path}")
             except Exception as e:
                 args.logger.warning(f"Failed to load best model: {e}")
-                best_model = enhanced_student
+                best_model = student
         else:
             args.logger.info("Using current model for prompt pool update")
-            best_model = enhanced_student
+            best_model = student
 
         # 增量更新prompt pool
         similarity_threshold = getattr(args, 'prompt_update_threshold', 0.8)
@@ -518,116 +610,6 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
         args.logger.info(f"Update statistics saved to {update_stats_path}")
         args.logger.info(f"Session {current_session} ends with {args.prompt_pool.num_prompts} prompts in pool")
 
-        adjacency_matrix = update_stats['adjacency_matrix']
-        graph_vis_path = os.path.join(args.model_dir, f'prompt_network_session_{current_session}.png')
-        visualize_graph_network(adjacency_matrix, graph_vis_path, max_nodes=5000, logger=args.logger)
-        args.logger.info(f"Prompt network visualization saved to {graph_vis_path}")
-
-# 手动计算匈牙利匹配
-"""
-def test_online(model, test_loader, epoch, save_name, args):
-    model.eval()
-
-    preds, targets = [], []
-    mask_hard = np.array([])
-    mask_soft = np.array([])
-    for batch_idx, (images, label, _) in enumerate(tqdm(test_loader)):
-        images = images.cuda(non_blocking=True)
-        with torch.no_grad():
-            _, logits = model(images)
-            preds.append(logits.argmax(1).cpu().numpy())
-            targets.append(label.cpu().numpy())
-
-            # args.train_classes 原始训练时定义的类别
-            mask_hard = np.append(mask_hard, np.array([True if x.item() in range(len(args.train_classes))
-                                                       else False for x in label]))
-            # args.num_seen_classes 当前已见类别范围
-            mask_soft = np.append(mask_soft, np.array([True if x.item() in range(args.num_seen_classes)
-                                                       else False for x in label]))
-
-    preds = np.concatenate(preds)
-    targets = np.concatenate(targets)
-
-    # -----------------------
-    # EVALUATE
-    # -----------------------
-    all_acc, old_acc, new_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_hard,
-                                                    T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
-                                                    args=args)
-
-    all_acc_soft, seen_acc, unseen_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_soft,
-                                                             T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
-                                                             args=args)
-
-    # 手动计算各个准确率 - 使用匈牙利算法进行标签重映射
-    from scipy.optimize import linear_sum_assignment
-
-    # 构建混淆矩阵
-    D = max(preds.max(), targets.max()) + 1
-    w = np.zeros((D, D), dtype=int)
-    for i in range(preds.size):
-        w[preds[i], targets[i]] += 1
-
-    # 应用匈牙利算法找到最佳标签映射
-    row_ind, col_ind = linear_sum_assignment(w.max() - w)
-    ind_map = {j: i for i, j in zip(col_ind, row_ind)}
-
-    # 重映射预测结果
-    remapped_preds = np.array([ind_map.get(p, p) for p in preds])
-
-    # 整体准确率 (使用重映射后的预测)
-    all_correct = np.sum(remapped_preds == targets)
-    all_total = len(targets)
-    all_Acc = all_correct / all_total
-    all_Acc_soft = all_Acc  # 这两个是相同的
-    print("all_Acc (remapped):", all_Acc)
-
-    # 旧类别准确率 (使用mask_hard和重映射后的预测)
-    old_preds = remapped_preds[mask_hard.astype(bool)]
-    old_targets = targets[mask_hard.astype(bool)]
-    old_correct = np.sum(old_preds == old_targets)
-    old_total = len(old_targets)
-    old_Acc = old_correct / max(old_total, 1)
-    print("old_Acc (remapped):", old_Acc)
-
-    # 新类别准确率 (使用mask_hard的反面和重映射后的预测)
-    new_preds = remapped_preds[~mask_hard.astype(bool)]
-    new_targets = targets[~mask_hard.astype(bool)]
-    new_correct = np.sum(new_preds == new_targets)
-    new_total = len(new_targets)
-    new_Acc = new_correct / max(new_total, 1)
-    print("new_Acc (remapped):", new_Acc)
-
-    # 已见类别准确率 (使用mask_soft和重映射后的预测)
-    seen_preds = remapped_preds[mask_soft.astype(bool)]
-    seen_targets = targets[mask_soft.astype(bool)]
-    seen_correct = np.sum(seen_preds == seen_targets)
-    seen_total = len(seen_targets)
-    seen_Acc = seen_correct / max(seen_total, 1)
-    print("seen_Acc (remapped):", seen_Acc)
-
-    # 未见类别准确率 (使用mask_soft的反面和重映射后的预测)
-    unseen_preds = remapped_preds[~mask_soft.astype(bool)]
-    unseen_targets = targets[~mask_soft.astype(bool)]
-    unseen_correct = np.sum(unseen_preds == unseen_targets)
-    unseen_total = len(unseen_targets)
-    unseen_Acc = unseen_correct / max(unseen_total, 1)
-    print("unseen_Acc (remapped):", unseen_Acc)
-
-    # 输出未见类别的详细信息
-    args.logger.info(
-        f"Unseen correct (remapped): {unseen_correct}/{unseen_total} = {unseen_correct / max(unseen_total, 1):.4f}")
-
-    # 对比原始计算和重映射后的计算结果
-    args.logger.info(f"Comparing with log_accs_from_preds results:")
-    args.logger.info(f"All: {all_Acc:.4f} vs {all_acc:.4f}")
-    args.logger.info(f"Old: {old_Acc:.4f} vs {old_acc:.4f}")
-    args.logger.info(f"New: {new_Acc:.4f} vs {new_acc:.4f}")
-    args.logger.info(f"Seen: {seen_Acc:.4f} vs {seen_acc:.4f}")
-    args.logger.info(f"Unseen: {unseen_Acc:.4f} vs {unseen_acc:.4f}")
-
-    return all_acc, old_acc, new_acc, all_acc_soft, seen_acc, unseen_acc
-"""
 
 def test_online(model, test_loader, epoch, save_name, current_session, args):
     """
@@ -702,87 +684,17 @@ def test_online(model, test_loader, epoch, save_name, current_session, args):
 
             plt.xlabel('Prediction')
             plt.ylabel('Ground Truth')
-            plt.title(f'Confusion Matrix - {current_session}')
+            plt.title(f'Confusion Matrix - Session {current_session}')
 
             # 保存混淆矩阵
-            conf_matrix_path = os.path.join(vis_dir, f'confusion_matrix_{current_session}.png')
+            conf_matrix_path = os.path.join(vis_dir, f'confusion_matrix_session_{current_session}.png')
             plt.tight_layout()
             plt.savefig(conf_matrix_path)
             plt.close()
             args.logger.info(f"Confusion matrix saved to: {conf_matrix_path}")
 
-            # 类别预测分布可视化
-            # 提取新类别的预测计数
-            new_class_counts = class_prediction_counts[args.num_labeled_classes:]
-
-            # 根据预测次数从大到小排序
-            sorted_indices = np.argsort(new_class_counts)[::-1]
-            sorted_counts = new_class_counts[sorted_indices]
-
-            # 可视化预测分布
-            plt.style.use('default')
-            plt.figure(figsize=(20, 16), dpi=300)
-            plt.bar(range(args.num_unlabeled_classes), sorted_counts, color='deepskyblue')
-            plt.xlabel('Class Index (Sorted by Prediction Count)', fontsize=20)
-            plt.ylabel('Instance Count', fontsize=20)
-            plt.title(f'New Classes Prediction Distribution - {current_session}', fontsize=20)
-
-            # 添加平均线
-            avg_count = np.mean(new_class_counts)
-            plt.axhline(y=avg_count, color='red', linestyle='--',
-                        label=f'Average Count: {avg_count:.2f}')
-
-            # 添加统计信息
-            unpredicted = np.sum(new_class_counts == 0)
-            if unpredicted > 0:
-                plt.annotate(f'{unpredicted} classes with zero predictions',
-                             xy=(0.7, 0.9), xycoords='axes fraction',
-                             bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8),
-                             fontsize=16)
-
-            plt.xticks(range(0, args.num_unlabeled_classes, 10), fontsize=16)
-            plt.legend(fontsize=16)
-            plt.grid(axis='y')
-
-            # 保存图像
-            dist_path = os.path.join(vis_dir, f'class_distribution_{current_session}.png')
-            plt.savefig(dist_path)
-            plt.close()
-            args.logger.info(f"Class prediction distribution saved to: {dist_path}")
-
-            # 额外添加：对比新旧类别预测
-            plt.figure(figsize=(12, 8), dpi=300)
-
-            # 旧类和新类的平均预测计数
-            old_class_counts = class_prediction_counts[:args.num_labeled_classes]
-            old_avg = np.mean(old_class_counts)
-            new_avg = np.mean(new_class_counts)
-
-            # 绘制条形图
-            plt.bar(['Old Classes', 'New Classes'], [old_avg, new_avg],
-                    color=['cornflowerblue', 'lightcoral'])
-            plt.ylabel('Average Predictions per Class', fontsize=16)
-            plt.title(f'Old vs New Classes Prediction Balance - {current_session}', fontsize=18)
-
-            # 添加比例标注
-            ratio = old_avg / new_avg if new_avg > 0 else float('inf')
-            plt.annotate(f'Old/New Ratio: {ratio:.2f}\n(Lower is better)',
-                         xy=(0.5, 0.8), xycoords='axes fraction',
-                         ha='center', fontsize=16,
-                         bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8))
-
-            plt.grid(axis='y')
-
-            # 保存图像
-            ratio_path = os.path.join(vis_dir, f'old_new_ratio_{current_session}.png')
-            plt.savefig(ratio_path)
-            plt.close()
-            args.logger.info(f"Old/new prediction ratio saved to: {ratio_path}")
-
         except Exception as e:
             args.logger.warning(f"Could not generate visualizations: {str(e)}")
-            import traceback
-            args.logger.warning(traceback.format_exc())
 
     # 计算评估指标
     all_acc, old_acc, new_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_hard,
@@ -794,13 +706,14 @@ def test_online(model, test_loader, epoch, save_name, current_session, args):
                                                              args=args)
 
     # 记录结果摘要
-    # args.logger.info(f"\nTest results summary (Epoch {epoch}):")
-    # args.logger.info(f"Hard metrics: All={all_acc:.4f}, Old={old_acc:.4f}, New={new_acc:.4f}")
-    # args.logger.info(f"Soft metrics: All={all_acc_soft:.4f}, Seen={seen_acc:.4f}, Unseen={unseen_acc:.4f}")
+    args.logger.info(f"\nTest results summary (Epoch {epoch}):")
+    args.logger.info(f"Hard metrics: All={all_acc:.4f}, Old={old_acc:.4f}, New={new_acc:.4f}")
+    args.logger.info(f"Soft metrics: All={all_acc_soft:.4f}, Seen={seen_acc:.4f}, Unseen={unseen_acc:.4f}")
 
     return all_acc, old_acc, new_acc, all_acc_soft, seen_acc, unseen_acc
-'''====================================================================================================================='''
 
+
+'''====================================================================================================================='''
 
 if __name__ == "__main__":
 
@@ -810,7 +723,8 @@ if __name__ == "__main__":
     parser.add_argument('--num_workers_test', default=4, type=int)
     parser.add_argument('--eval_funcs', nargs='+', help='Which eval functions to use', default=['v2'])
 
-    parser.add_argument('--dataset_name', type=str, default='cifar100', help='options: cifar10, cifar100, tiny_imagenet, cub, imagenet_100')
+    parser.add_argument('--dataset_name', type=str, default='cifar100',
+                        help='options: cifar10, cifar100, tiny_imagenet, cub, imagenet_100')
     parser.add_argument('--use_ssb_splits', action='store_true', default=True)
 
     parser.add_argument('--grad_from_block', type=int, default=11)
@@ -833,10 +747,12 @@ if __name__ == "__main__":
     parser.add_argument('--memax_old_new_weight', type=float, default=2)
     parser.add_argument('--memax_old_in_weight', type=float, default=1)
     parser.add_argument('--memax_new_in_weight', type=float, default=1)
-    parser.add_argument('--warmup_teacher_temp', default=0.07, type=float, help='Initial value for the teacher temperature.')
-    parser.add_argument('--teacher_temp', default=0.04, type=float, help='Final value (after linear warmup) of the teacher temperature.')
-    #parser.add_argument('--teacher_temp_final', default=0.05, type=float, help='Final value (online session) of the teacher temperature.')
-    parser.add_argument('--warmup_teacher_temp_epochs', default=30, type=int, help='Number of warmup epochs for the teacher temperature. default = 30')
+    parser.add_argument('--warmup_teacher_temp', default=0.07, type=float,
+                        help='Initial value for the teacher temperature.')
+    parser.add_argument('--teacher_temp', default=0.04, type=float,
+                        help='Final value (after linear warmup) of the teacher temperature.')
+    parser.add_argument('--warmup_teacher_temp_epochs', default=30, type=int,
+                        help='Number of warmup epochs for the teacher temperature. default = 30')
 
     '''clustering-guided initialization'''
     parser.add_argument('--init_new_head', action='store_true', default=False)
@@ -871,21 +787,32 @@ if __name__ == "__main__":
     parser.add_argument('--print_freq', default=10, type=int)
     parser.add_argument('--exp_name', default='simgcd-pro-v5', type=str)
 
-    '''prompt pool'''
-    parser.add_argument('--prompt_pool', action='store_true', default=False,
-                        help='Use prompt pool for feature enhancement')
-
+    '''prompt pool training parameters'''
+    parser.add_argument('--enable_prompt_training', action='store_true', default=True,
+                        help='Enable prompt pool training')
+    parser.add_argument('--prompt_learning_weight', type=float, default=0.1,
+                        help='Weight for prompt learning losses')
+    parser.add_argument('--prompt_diversity_weight', type=float, default=0.05,
+                        help='Weight for prompt diversity loss')
+    parser.add_argument('--prompt_alignment_weight', type=float, default=0.1,
+                        help='Weight for prompt-feature alignment loss')
+    parser.add_argument('--prompt_update_threshold', type=float, default=0.8,
+                        help='Similarity threshold for prompt pool updates')
+    parser.add_argument('--prompt_ema_alpha', type=float, default=0.9,
+                        help='EMA alpha for prompt updates')
+    parser.add_argument('--max_prompts', type=int, default=200,
+                        help='Maximum number of prompts in the pool')
 
     # ----------------------
     # INIT
     # ----------------------
     args = parser.parse_args()
     device = torch.device('cuda:0')
-    #set_seed(args.seed)
+    # set_seed(args.seed)
     args = get_class_splits(args)
 
     args.num_labeled_classes = len(args.train_classes)
-    args.num_unlabeled_classes = len(args.unlabeled_classes) # get_dataset
+    args.num_unlabeled_classes = len(args.unlabeled_classes)  # get_dataset
 
     args.exp_root = args.exp_root + '_' + args.train_session
     args.exp_name = 'happy' + '-' + args.train_session
@@ -895,8 +822,9 @@ if __name__ == "__main__":
 
     elif args.train_session == 'online':
         args.base_exp_id = 'Old' + str(args.num_labeled_classes) + '_' + 'Ratio' + str(args.prop_train_labels) \
-            + '_' + 'ContinualNum' + str(args.continual_session_num) + '_' + 'UnseenNum' + str(args.online_novel_unseen_num) \
-                + '_' + 'SeenNum' + str(args.online_novel_seen_num)
+                           + '_' + 'ContinualNum' + str(args.continual_session_num) + '_' + 'UnseenNum' + str(
+            args.online_novel_unseen_num) \
+                           + '_' + 'SeenNum' + str(args.online_novel_seen_num)
 
     else:
         raise NotImplementedError
@@ -922,13 +850,19 @@ if __name__ == "__main__":
     args.num_mlp_layers = 3
     args.mlp_out_dim = args.num_labeled_classes
 
-    # 初始化prompt pool
-    args.prompt_pool = PromptPool(
+    # 初始化可学习的prompt pool
+    args.prompt_pool = LearnablePromptPool(
         feature_dim=args.feat_dim,
         similarity_threshold=0.7,
         community_ratio=1.4,
-        device=device
+        device=device,
+        max_prompts=args.max_prompts
     )
+
+    # 设置prompt pool的训练权重
+    args.prompt_pool.prompt_learning_weight = args.prompt_learning_weight
+    args.prompt_pool.diversity_weight = args.prompt_diversity_weight
+    args.prompt_pool.alignment_weight = args.prompt_alignment_weight
 
     # 设置backbone哪些层需要微调
     for m in backbone.parameters():
@@ -948,10 +882,17 @@ if __name__ == "__main__":
         backbone=backbone,
         projector=projector,
         prompt_pool=args.prompt_pool,
-        top_k=5  # 可以将此设置为参数
+        top_k=5,
+        enable_prompt_training=args.enable_prompt_training
     )
 
     model.to(device)
+
+    args.logger.info(f"Model created with prompt training {'enabled' if args.enable_prompt_training else 'disabled'}")
+    if args.enable_prompt_training:
+        args.logger.info(f"Prompt pool max size: {args.max_prompts}")
+        args.logger.info(
+            f"Prompt learning weights - main: {args.prompt_learning_weight}, diversity: {args.prompt_diversity_weight}, alignment: {args.prompt_alignment_weight}")
 
     # --------------------
     # CONTRASTIVE TRANSFORM
@@ -959,17 +900,16 @@ if __name__ == "__main__":
     train_transform, test_transform = get_transform(args.transform, image_size=args.image_size, args=args)
     train_transform = ContrastiveLearningViewGenerator(base_transform=train_transform, n_views=args.n_views)
 
-
     # ----------------------
     # 1. OFFLINE TRAIN
     # ----------------------
     if args.train_session == 'offline':
         args.logger.info('========== offline training with labeled old data (old) ==========')
         args.logger.info('loading dataset...')
-        offline_session_train_dataset, offline_session_test_dataset,\
-            _online_session_train_dataset_list, _online_session_test_dataset_list,\
-                datasets, dataset_split_config_dict, novel_targets_shuffle = get_datasets(
-                    args.dataset_name, train_transform, test_transform, args)
+        offline_session_train_dataset, offline_session_test_dataset, \
+            _online_session_train_dataset_list, _online_session_test_dataset_list, \
+            datasets, dataset_split_config_dict, novel_targets_shuffle = get_datasets(
+            args.dataset_name, train_transform, test_transform, args)
 
         # saving dataset dict
         print('save dataset dict...')
@@ -982,7 +922,8 @@ if __name__ == "__main__":
         f_dataset_dict.close()
 
         offline_session_train_loader = DataLoader(offline_session_train_dataset, num_workers=args.num_workers,
-                                                  batch_size=args.batch_size, shuffle=True, drop_last=True, pin_memory=True)
+                                                  batch_size=args.batch_size, shuffle=True, drop_last=True,
+                                                  pin_memory=True)
         offline_session_test_loader = DataLoader(offline_session_test_dataset, num_workers=args.num_workers_test,
                                                  batch_size=256, shuffle=False, pin_memory=False)
 
@@ -996,12 +937,13 @@ if __name__ == "__main__":
     # 2. ONLINE TRAIN
     # ----------------------
     elif args.train_session == 'online':
-        args.logger.info('\n\n==================== online continual GCD with unlabeled data (old + novel) ====================')
+        args.logger.info(
+            '\n\n==================== online continual GCD with unlabeled data (old + novel) ====================')
         args.logger.info('loading dataset...')
-        _offline_session_train_dataset, _offline_session_test_dataset,\
-            online_session_train_dataset_list, online_session_test_dataset_list,\
-                datasets, dataset_split_config_dict, novel_targets_shuffle = get_datasets(
-                    args.dataset_name, train_transform, test_transform, args)
+        _offline_session_train_dataset, _offline_session_test_dataset, \
+            online_session_train_dataset_list, online_session_test_dataset_list, \
+            datasets, dataset_split_config_dict, novel_targets_shuffle = get_datasets(
+            args.dataset_name, train_transform, test_transform, args)
 
         # saving dataset dict
         print('save dataset dict...')
@@ -1015,7 +957,6 @@ if __name__ == "__main__":
         f_dataset_dict.write(str(args.num_unlabeled_classes // args.continual_session_num))
         f_dataset_dict.close()
 
-
         # ----------------------
         # CONTINUAL SESSIONS
         # ----------------------
@@ -1026,7 +967,8 @@ if __name__ == "__main__":
         v5: ProtoAug Manager
         初始化一个ProtoAugManager实例
         '''
-        proto_aug_manager = ProtoAugManager(args.feat_dim, args.n_views*args.batch_size, args.hardness_temp, args.radius_scale, device, args.logger)
+        proto_aug_manager = ProtoAugManager(args.feat_dim, args.n_views * args.batch_size, args.hardness_temp,
+                                            args.radius_scale, device, args.logger)
 
         # best test acc list across continual sessions
         args.best_test_acc_all_list = []
@@ -1039,33 +981,41 @@ if __name__ == "__main__":
         start_session = 0
 
         '''Continual GCD sessions'''
-        #for session in range(args.continual_session_num):
-        for session in range(start_session, args.continual_session_num): # cifar100: session 0->4
-            args.logger.info('\n\n========== begin online continual session-{} ==============='.format(session+1))
+        for session in range(start_session, args.continual_session_num):
+            args.logger.info('\n\n========== begin online continual session-{} ==============='.format(session + 1))
             # dataset for the current session
             online_session_train_dataset = online_session_train_dataset_list[session]
             online_session_test_dataset = online_session_test_dataset_list[session]
             online_session_train_loader = DataLoader(online_session_train_dataset, num_workers=args.num_workers,
-                                                     batch_size=args.batch_size, shuffle=True, drop_last=True, pin_memory=True)
+                                                     batch_size=args.batch_size, shuffle=True, drop_last=True,
+                                                     pin_memory=True)
             online_session_test_loader = DataLoader(online_session_test_dataset, num_workers=args.num_workers_test,
                                                     batch_size=256, shuffle=False, pin_memory=False)
 
             # number of seen (offline old + previous online new) classes till the beginning of this session
-            args.num_seen_classes = args.num_labeled_classes + args.num_novel_class_per_session * session # example(cifar100)：session 1: old + 10*0 = 50 + 0 = 50
-            args.logger.info('number of seen class (old + seen novel) at the beginning of current session: {}'.format(args.num_seen_classes))
+            args.num_seen_classes = args.num_labeled_classes + args.num_novel_class_per_session * session
+            args.logger.info('number of seen class (old + seen novel) at the beginning of current session: {}'.format(
+                args.num_seen_classes))
+
             if args.dataset_name == 'cifar100':
-                args.num_cur_novel_classes = len(np.unique(online_session_train_dataset.novel_unlabelled_dataset.targets))
+                args.num_cur_novel_classes = len(
+                    np.unique(online_session_train_dataset.novel_unlabelled_dataset.targets))
             elif args.dataset_name == 'tiny_imagenet':
-                novel_cls_labels = [t for i, (p, t) in enumerate(online_session_train_dataset.novel_unlabelled_dataset.data)]
+                novel_cls_labels = [t for i, (p, t) in
+                                    enumerate(online_session_train_dataset.novel_unlabelled_dataset.data)]
                 args.num_cur_novel_classes = len(np.unique(novel_cls_labels))
             elif args.dataset_name == 'aircraft':
-                novel_cls_labels = [t for i, (p, t) in enumerate(online_session_train_dataset.novel_unlabelled_dataset.samples)]
+                novel_cls_labels = [t for i, (p, t) in
+                                    enumerate(online_session_train_dataset.novel_unlabelled_dataset.samples)]
                 args.num_cur_novel_classes = len(np.unique(novel_cls_labels))
             elif args.dataset_name == 'scars':
-                args.num_cur_novel_classes = len(np.unique(online_session_train_dataset.novel_unlabelled_dataset.target))   # NOTE!!! target
+                args.num_cur_novel_classes = len(
+                    np.unique(online_session_train_dataset.novel_unlabelled_dataset.target))
             else:
-                args.num_cur_novel_classes = args.num_novel_class_per_session * (session+1)
-            args.logger.info('number of all novel class (seen novel + unseen novel) in current session: {}'.format(args.num_cur_novel_classes))
+                args.num_cur_novel_classes = args.num_novel_class_per_session * (session + 1)
+            args.logger.info('number of all novel class (seen novel + unseen novel) in current session: {}'.format(
+                args.num_cur_novel_classes))
+
             '''tunable params in backbone'''
             ####################################################################################################################
             # freeze backbone params
@@ -1081,21 +1031,21 @@ if __name__ == "__main__":
             ####################################################################################################################
 
             '''load ckpts from last session (session>0) or offline session (session=0)'''
-            '''确保每个新阶段都能从之前阶段学到的知识开始，而不是从头学习。'''
-
             ####################################################################################################################
             args.logger.info('loading checkpoints of model_pre...')
             if session == 0:
-                projector_pre = DINOHead(in_dim=args.feat_dim, out_dim=args.num_labeled_classes, nlayers=args.num_mlp_layers)
+                projector_pre = DINOHead(in_dim=args.feat_dim, out_dim=args.num_labeled_classes,
+                                         nlayers=args.num_mlp_layers)
                 model_pre = PromptEnhancedModel(
                     backbone=deepcopy(backbone),
                     projector=projector_pre,
                     prompt_pool=args.prompt_pool,
-                    top_k=5
+                    top_k=5,
+                    enable_prompt_training=args.enable_prompt_training
                 )
                 if args.load_offline_id is not None:
-                    load_dir_online = os.path.join(exp_root + '_' + 'offline', args.dataset_name, args.load_offline_id, 'checkpoints', 'model_best.pt') # session 0 加载的是离线训练的模型
-                    # load_dir_online = '/home/ps/_jinwei/Happy-CGCD/Official_checkpoints/C100_Stage0/model_best.pt'
+                    load_dir_online = os.path.join(exp_root + '_' + 'offline', args.dataset_name, args.load_offline_id,
+                                                   'checkpoints', 'model_best.pt')
                     args.logger.info('loading offline checkpoints from: ' + load_dir_online)
                     load_dict = torch.load(load_dir_online)
 
@@ -1111,13 +1061,15 @@ if __name__ == "__main__":
                     model_pre.load_state_dict(load_dict['model'])
                     args.logger.info('successfully loaded checkpoints!')
 
-            else:        # session > 0
-                projector_pre = DINOHead(in_dim=args.feat_dim, out_dim=args.num_seen_classes, nlayers=args.num_mlp_layers)
+            else:  # session > 0
+                projector_pre = DINOHead(in_dim=args.feat_dim, out_dim=args.num_seen_classes,
+                                         nlayers=args.num_mlp_layers)
                 model_pre = PromptEnhancedModel(
                     backbone=deepcopy(backbone),
                     projector=projector_pre,
                     prompt_pool=args.prompt_pool,
-                    top_k=5
+                    top_k=5,
+                    enable_prompt_training=args.enable_prompt_training
                 )
                 load_dir_online = args.model_path[:-3] + '_session-' + str(session) + f'_best.pt'
                 args.logger.info('loading checkpoints from last online session: ' + load_dir_online)
@@ -1128,33 +1080,23 @@ if __name__ == "__main__":
 
             '''incremental parametric classifier in SimGCD'''
             ####################################################################################################################
-            ####################################################################################################################
-            backbone_cur = deepcopy(backbone)   # NOTE!!!
+            backbone_cur = deepcopy(backbone)
             backbone_cur.load_state_dict(model_pre.backbone.state_dict())
-            args.mlp_out_dim_cur = args.num_labeled_classes + args.num_cur_novel_classes   # total num of classes in the current session 拓展分类器，添加输出结点
+            args.mlp_out_dim_cur = args.num_labeled_classes + args.num_cur_novel_classes
             args.logger.info('number of all class (old + all new) in current session: {}'.format(args.mlp_out_dim_cur))
             projector_cur = DINOHead(in_dim=args.feat_dim, out_dim=args.mlp_out_dim_cur, nlayers=args.num_mlp_layers)
             args.logger.info('transferring classification head of seen classes...')
 
-            # ==============================================================
-            # 模型在每个新会话中都以上一个会话的知识为基础，同时扩展自身能力来适应新类别；
-            # 权重迁移，模型从一个session进入下一个session时，需要扩展分类器以容纳新类别，同时保留对已见类别的知识；直接转移上一个模型中已知类的分类器权重，保证已知类的知识不会丢失
             # transfer seen classes' weights
-            # ==============================================================
-            projector_cur.last_layer.weight_v.data[:args.num_seen_classes] = model_pre.projector.last_layer.weight_v.data[:args.num_seen_classes]
-            projector_cur.last_layer.weight_g.data[:args.num_seen_classes] = model_pre.projector.last_layer.weight_g.data[:args.num_seen_classes]
-            projector_cur.last_layer.weight.data[:args.num_seen_classes] = model_pre.projector.last_layer.weight.data[:args.num_seen_classes]
+            projector_cur.last_layer.weight_v.data[
+            :args.num_seen_classes] = model_pre.projector.last_layer.weight_v.data[:args.num_seen_classes]
+            projector_cur.last_layer.weight_g.data[
+            :args.num_seen_classes] = model_pre.projector.last_layer.weight_g.data[:args.num_seen_classes]
+            projector_cur.last_layer.weight.data[:args.num_seen_classes] = model_pre.projector.last_layer.weight.data[
+                                                                           :args.num_seen_classes]
+
             # initialize new class heads
-            #############################################
             online_session_train_dataset_for_new_head_init = deepcopy(online_session_train_dataset)
-            """
-            online_session_train_dataset
-            ├── old_unlabelled_dataset  // 包含旧类别的无标签数据
-            └── novel_unlabelled_dataset  // 包含新类别的无标签数据（包括已见类）
-            """
-
-            # 使用测试变换而非训练变换的原因：初始化分类器头需要稳定、干净的特征表示，不需要训练时的数据增强
-
             online_session_train_dataset_for_new_head_init.old_unlabelled_dataset.transform = test_transform
             online_session_train_dataset_for_new_head_init.novel_unlabelled_dataset.transform = test_transform
             online_session_train_loader_for_new_head_init = DataLoader(
@@ -1166,57 +1108,47 @@ if __name__ == "__main__":
             )
 
             if args.init_new_head:
-                new_head = get_kmeans_centroid_for_new_head(model_pre, online_session_train_loader_for_new_head_init, args, device)   # torch.Size([10, 768])
+                new_head = get_kmeans_centroid_for_new_head(model_pre, online_session_train_loader_for_new_head_init,
+                                                            args, device)
 
-                """
-                projector_cur.last_layer.weight_v.data[args.num_seen_classes:] 这部分就是指向分类器中为新类别预留的权重部分。
-                在执行K-means初始化之前，这些权重是通过标准的随机初始化方法（如PyTorch默认的初始化）创建的。
-                这行代码实际上是在:
-                1. 对每个新类别位置的随机初始化权重向量计算范数（向量长度）
-                2. 对所有这些范数求平均值
-                然后使用这个平均范数来缩放通过K-means获得的新类别表示，使得替换后的权重在数值规模上与随机初始化的权重相似。
-                这是一种确保新权重与网络其他部分在数值上兼容的技巧，有助于保持训练过程的稳定性。
-                """
-
-                # 保持范数一致性：通过计算这些初始随机权重的平均范数，然后用同样的范数来缩放K-means得到的新类别质心，确保新初始化的权重与分类器其他部分具有相似的规模。
-                norm_new_head_weight_v = torch.norm(projector_cur.last_layer.weight_v.data[args.num_seen_classes:], dim=-1).mean()
-                norm_new_head_weight = torch.norm(projector_cur.last_layer.weight.data[args.num_seen_classes:], dim=-1).mean()
+                norm_new_head_weight_v = torch.norm(projector_cur.last_layer.weight_v.data[args.num_seen_classes:],
+                                                    dim=-1).mean()
+                norm_new_head_weight = torch.norm(projector_cur.last_layer.weight.data[args.num_seen_classes:],
+                                                  dim=-1).mean()
                 new_head_weight_v = new_head * norm_new_head_weight_v
                 new_head_weight = new_head * norm_new_head_weight
                 args.logger.info('initializing classification head of unseen novel classes...')
 
-                # 只更新新类别的部分，保留已知类别的权重不变
-                projector_cur.last_layer.weight_v.data[args.num_seen_classes:] = new_head_weight_v.data   # copy
+                projector_cur.last_layer.weight_v.data[args.num_seen_classes:] = new_head_weight_v.data
                 projector_cur.last_layer.weight.data[args.num_seen_classes:] = new_head_weight.data
-                # 结合[:args.num_seen_classes]，projector_cur全部更新完
-                """
-                [:args.num_seen_classes]：已知类别的权重，这部分通过从 projector_pre 中直接复制完成更新。
-                [args.num_seen_classes:]：新类别的权重，这部分通过 K-means 初始化完成更新。
-                """
-            ##############################################
 
             model_cur = PromptEnhancedModel(
                 backbone=backbone_cur,
                 projector=projector_cur,
                 prompt_pool=args.prompt_pool,
-                top_k=5
-            )   # NOTE!!! backbone_cur
+                top_k=5,
+                enable_prompt_training=args.enable_prompt_training
+            )
 
-            args.logger.info('incremental classifier heads from {} to {}'.format(len(model_pre.projector.last_layer.weight_v), len(model_cur.projector.last_layer.weight_v)))
+            args.logger.info(
+                'incremental classifier heads from {} to {}'.format(len(model_pre.projector.last_layer.weight_v),
+                                                                    len(model_cur.projector.last_layer.weight_v)))
 
             model_cur.to(device)
-            ####################################################################################################################
             ####################################################################################################################
 
             '''compute prototypes offline (session = 0)'''
             if session == 0:
-                args.logger.info('Before Train: compute offline prototypes and radius from {} classes with the best model...'.format(args.num_labeled_classes))
+                args.logger.info(
+                    'Before Train: compute offline prototypes and radius from {} classes with the best model...'.format(
+                        args.num_labeled_classes))
                 offline_session_train_dataset_for_proto_aug = deepcopy(_offline_session_train_dataset)
                 offline_session_train_dataset_for_proto_aug.transform = test_transform
-                offline_session_train_loader_for_proto_aug = DataLoader(offline_session_train_dataset_for_proto_aug, num_workers=args.num_workers_test,
+                offline_session_train_loader_for_proto_aug = DataLoader(offline_session_train_dataset_for_proto_aug,
+                                                                        num_workers=args.num_workers_test,
                                                                         batch_size=256, shuffle=False, pin_memory=False)
-                # NOTE!!! use model_pre && offline_session_train_loader
-                proto_aug_manager.update_prototypes_offline(model_pre, offline_session_train_loader_for_proto_aug, args.num_labeled_classes)
+                proto_aug_manager.update_prototypes_offline(model_pre, offline_session_train_loader_for_proto_aug,
+                                                            args.num_labeled_classes)
                 save_path = os.path.join(args.model_dir, 'ProtoAugDict' + '_offline' + f'.pt')
                 args.logger.info('Saving ProtoAugDict to {}.'.format(save_path))
                 proto_aug_manager.save_proto_aug_dict(save_path)
@@ -1224,19 +1156,21 @@ if __name__ == "__main__":
             # ----------------------
             # TRAIN
             # ----------------------
-            train_online(model_cur, model_pre, proto_aug_manager, online_session_train_loader, online_session_test_loader, session+1, args)
+            train_online(model_cur, model_pre, proto_aug_manager, online_session_train_loader,
+                         online_session_test_loader, session + 1, args)
 
             '''compute prototypes online after train (session > 0)'''
-            #############################################################################################################
-            args.logger.info('After Train: update online prototypes from {} to {} classes with the best model...'.format(args.num_seen_classes, args.num_labeled_classes + args.num_cur_novel_classes))
-            # NOTE!!! use model_cur_best && online_session_train_loader
-            load_dir_online_best = args.model_path[:-3] + '_session-' + str(session+1) + f'_best.pt'   # NOTE!!! session, best
+            args.logger.info(
+                'After Train: update online prototypes from {} to {} classes with the best model...'.format(
+                    args.num_seen_classes, args.num_labeled_classes + args.num_cur_novel_classes))
+            load_dir_online_best = args.model_path[:-3] + '_session-' + str(session + 1) + f'_best.pt'
             args.logger.info('loading best checkpoints current online session: ' + load_dir_online_best)
             load_dict = torch.load(load_dir_online_best)
             model_cur.load_state_dict(load_dict['model'])
             proto_aug_manager.update_prototypes_online(model_cur, online_session_train_loader_for_new_head_init,
-                                                       args.num_seen_classes, args.num_labeled_classes + args.num_cur_novel_classes)
-            save_path = os.path.join(args.model_dir, 'ProtoAugDict' + '_session-' + str(session+1) + f'.pt')
+                                                       args.num_seen_classes,
+                                                       args.num_labeled_classes + args.num_cur_novel_classes)
+            save_path = os.path.join(args.model_dir, 'ProtoAugDict' + '_session-' + str(session + 1) + f'.pt')
             args.logger.info('Saving ProtoAugDict to {}.'.format(save_path))
             proto_aug_manager.save_proto_aug_dict(save_path)
 
@@ -1249,16 +1183,22 @@ if __name__ == "__main__":
                 'best_test_acc_seen_list': args.best_test_acc_seen_list,
                 'best_test_acc_unseen_list': args.best_test_acc_unseen_list,
             }
-            save_results_path = os.path.join(args.model_dir, 'best_acc_list' + '_session-' + str(session+1) + f'.pt')
+            save_results_path = os.path.join(args.model_dir, 'best_acc_list' + '_session-' + str(session + 1) + f'.pt')
             args.logger.info('Saving results (best acc list) to {}.'.format(save_results_path))
             torch.save(best_acc_list_dict, save_results_path)
 
         # print final results
-        args.logger.info('\n\n==================== print final results over {} continual sessions ===================='.format(args.continual_session_num))
+        args.logger.info(
+            '\n\n==================== print final results over {} continual sessions ===================='.format(
+                args.continual_session_num))
         for session in range(args.continual_session_num):
-            args.logger.info(f'Session-{session+1}: All (Hard): {args.best_test_acc_all_list[session]:.4f} Old: {args.best_test_acc_old_list[session]:.4f} New: {args.best_test_acc_new_list[session]:.4f} | All (Soft): {args.best_test_acc_soft_all_list[session]:.4f} Seen: {args.best_test_acc_seen_list[session]:.4f} Unseen: {args.best_test_acc_unseen_list[session]:.4f}')
+            args.logger.info(
+                f'Session-{session + 1}: All (Hard): {args.best_test_acc_all_list[session]:.4f} Old: {args.best_test_acc_old_list[session]:.4f} New: {args.best_test_acc_new_list[session]:.4f} | All (Soft): {args.best_test_acc_soft_all_list[session]:.4f} Seen: {args.best_test_acc_seen_list[session]:.4f} Unseen: {args.best_test_acc_unseen_list[session]:.4f}')
         for session in range(args.continual_session_num):
-            print(f'Session-{session+1}: All (Hard): {args.best_test_acc_all_list[session]:.4f} Old: {args.best_test_acc_old_list[session]:.4f} New: {args.best_test_acc_new_list[session]:.4f} | All (Soft): {args.best_test_acc_soft_all_list[session]:.4f} Seen: {args.best_test_acc_seen_list[session]:.4f} Unseen: {args.best_test_acc_unseen_list[session]:.4f}')
+            print(
+                f'Session-{session + 1}: All (Hard): {args.best_test_acc_all_list[session]:.4f} Old: {args.best_test_acc_old_list[session]:.4f} New: {args.best_test_acc_new_list[session]:.4f} | All (Soft): {args.best_test_acc_soft_all_list[session]:.4f} Seen: {args.best_test_acc_seen_list[session]:.4f} Unseen: {args.best_test_acc_unseen_list[session]:.4f}')
 
     else:
         raise NotImplementedError
+
+
