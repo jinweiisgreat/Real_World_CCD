@@ -3,7 +3,7 @@ import numpy as np
 from sklearn.cluster import KMeans
 import torch
 from tqdm import tqdm
-from models.prompt_enhanced_model import PromptEnhancedModel
+from models.prompt_enhanced_model_trainable import PromptEnhancedModel
 
 '''
 get_kmeans_centroid_for_new_head(): use model_pre to obtain new class head init

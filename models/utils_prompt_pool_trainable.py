@@ -19,11 +19,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from scipy.sparse import csr_matrix
-from tqdm import tqdm
-import community as community_louvain
-import networkx as nx
 from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.cluster import KMeans
+from tqdm import tqdm
+import networkx as nx
+import community as community_louvain
 import matplotlib.pyplot as plt
 import os
 import seaborn as sns
@@ -138,21 +138,9 @@ def visualize_graph_network(adjacency_matrix, save_path, max_nodes=5000, logger=
         if logger:
             logger.error(f"Create picture failed: {str(e)}")
 
-
 class LearnablePromptPool(nn.Module):
     def __init__(self, feature_dim, min_community_size=5, similarity_threshold=0.6,
                  community_ratio=1.4, device='cuda', max_prompts=200):
-        """
-        Initialize the Learnable Prompt Pool.
-
-        Args:
-            feature_dim: Dimension of feature vectors
-            min_community_size: Minimum size of a community to be considered
-            similarity_threshold: Threshold for constructing adjacency matrix
-            community_ratio: Ratio of number of communities to number of classes
-            device: Device to run computations on
-            max_prompts: Maximum number of prompts to prevent memory explosion
-        """
         super(LearnablePromptPool, self).__init__()
 
         self.feature_dim = feature_dim
@@ -163,52 +151,45 @@ class LearnablePromptPool(nn.Module):
         self.max_prompts = max_prompts
         self.num_prompts = 0
 
-        # 可学习的prompt参数
-        self.prompts = None
-        self.prompt_keys = None
+        # 可学习的prompt参数：分离Key和Value的设计
+        self.prompt_keys = None  # 用于相似度计算和prompt选择
+        self.prompt_values = None  # 用于实际的特征增强
 
-        # 训练相关参数
-        self.prompt_learning_weight = 0.1  # prompt训练损失的权重
-        self.diversity_weight = 0.05  # diversity损失权重
-        self.alignment_weight = 0.1  # alignment损失权重
+        # 统计信息
+        self.prompt_usage_stats = None
+        self.community_info = []
 
-    def _initialize_learnable_prompts(self, initial_prompts):
-        """从社区检测结果初始化可学习的prompts"""
-        if initial_prompts is not None:
-            self.num_prompts = min(len(initial_prompts), self.max_prompts)
-
-            # 初始化可学习的prompt参数
-            self.prompts = nn.Parameter(
-                initial_prompts[:self.num_prompts].clone().detach()
-            )
-            self.prompt_keys = nn.Parameter(
-                initial_prompts[:self.num_prompts].clone().detach()
-            )
-
-            print(f"Initialized {self.num_prompts} learnable prompts")
+        # 训练相关权重
+        self.task_alignment_weight = 0.8  # 任务对齐损失权重
+        self.usage_efficiency_weight = 0.2  # 使用效率损失权重
+        self.key_value_consistency_weight = 0.1  # Key-Value一致性权重
 
     def create_prompt_pool(self, model, data_loader, num_classes, logger):
         """
-        Create prompt pool from offline training data
+        使用社区发现算法创建初始的prompt pool
 
         Args:
-            model: The trained feature extractor
-            data_loader: DataLoader for the dataset
-            num_classes: Number of classes in the dataset
-            logger: Logger to log progress
+            model: 训练后的模型，用于特征提取
+            data_loader: 数据加载器
+            num_classes: 类别数量
+            logger: 日志记录器
+
+        Returns:
+            prompt_pool_stats: 创建统计信息
         """
         logger.info("Creating prompt pool using community detection...")
         model.eval()
 
-        # Extract features for all samples
+        # 第一步：提取所有样本的特征
         all_features = []
         all_labels = []
 
         with torch.no_grad():
             for batch_idx, (images, labels, _) in enumerate(tqdm(data_loader, desc="Extracting features")):
                 images = images.to(self.device)
-                features = model.backbone(images)  # Extract features from backbone
-                features = F.normalize(features, dim=1)  # Normalize features
+                # 使用已训练的backbone提取特征
+                features = model.backbone(images)
+                features = F.normalize(features, dim=1)
                 all_features.append(features.cpu())
                 all_labels.append(labels)
 
@@ -217,23 +198,26 @@ class LearnablePromptPool(nn.Module):
 
         logger.info(f"Extracted features for {len(all_features)} samples")
 
-        # Compute similarity matrix
+        # 第二步：构建相似度矩阵和邻接矩阵
         logger.info("Computing similarity matrix...")
         similarity_matrix = cosine_similarity(all_features)
 
-        # Create adjacency matrix with threshold
         logger.info(f"Creating adjacency matrix with threshold {self.similarity_threshold}...")
         adjacency_matrix = (similarity_matrix > self.similarity_threshold).astype(np.int8)
-        np.fill_diagonal(adjacency_matrix, 0)  # Remove self-loops
+        np.fill_diagonal(adjacency_matrix, 0)  # 移除自环
 
-        # Convert to graph for community detection
-        logger.info("Converting to graph and detecting communities...")
+        # 第三步：使用Louvain算法进行社区检测
+        logger.info("Performing community detection...")
         G = nx.from_numpy_array(adjacency_matrix)
 
-        # Use Louvain method for community detection
+        if G.number_of_nodes() == 0:
+            logger.warning("Empty graph, using K-means as fallback")
+            return self._fallback_kmeans_initialization(all_features, num_classes, logger)
+
+        # 使用Louvain方法进行社区检测
         partition = community_louvain.best_partition(G, resolution=1.0)
 
-        # Get communities
+        # 第四步：处理社区检测结果
         communities = {}
         for node, community_id in partition.items():
             if community_id not in communities:
@@ -242,286 +226,154 @@ class LearnablePromptPool(nn.Module):
 
         logger.info(f"Detected {len(communities)} communities")
 
-        # Calculate target number of communities
+        # 第五步：筛选有效社区并生成prompt
+        valid_communities = {k: v for k, v in communities.items()
+                             if len(v) >= self.min_community_size}
+
+        logger.info(f"Found {len(valid_communities)} valid communities (size >= {self.min_community_size})")
+
+        # 如果有效社区太少，降低最小社区大小要求
         target_num_communities = int(num_classes * self.community_ratio)
-        logger.info(f"Target number of communities: {target_num_communities}")
+        while len(valid_communities) < target_num_communities and self.min_community_size > 2:
+            self.min_community_size -= 1
+            valid_communities = {k: v for k, v in communities.items()
+                                 if len(v) >= self.min_community_size}
+            logger.info(f"Reduced min_community_size to {self.min_community_size}, "
+                        f"now have {len(valid_communities)} valid communities")
 
-        # Filter communities by size
-        valid_communities = {k: v for k, v in communities.items() if len(v) >= self.min_community_size}
-        logger.info(f"Number of valid communities (size >= {self.min_community_size}): {len(valid_communities)}")
-
-        # If we have too few communities, reduce the min_community_size
-        if len(valid_communities) < target_num_communities:
-            while len(valid_communities) < target_num_communities and self.min_community_size > 2:
-                self.min_community_size -= 1
-                valid_communities = {k: v for k, v in communities.items() if len(v) >= self.min_community_size}
-                logger.info(
-                    f"Reduced min_community_size to {self.min_community_size}, now have {len(valid_communities)} valid communities")
-
-        # If we have too many communities, keep the largest ones
-        community_sizes = [(k, len(v)) for k, v in valid_communities.items()]
-        community_sizes.sort(key=lambda x: x[1], reverse=True)
-
+        # 如果社区太多，保留最大的几个
         if len(valid_communities) > target_num_communities:
+            community_sizes = [(k, len(v)) for k, v in valid_communities.items()]
+            community_sizes.sort(key=lambda x: x[1], reverse=True)
             valid_community_ids = [k for k, _ in community_sizes[:target_num_communities]]
             valid_communities = {k: valid_communities[k] for k in valid_community_ids}
             logger.info(f"Keeping top {target_num_communities} communities by size")
 
-        # Create prompts from community means
+        # 第六步：从社区生成prompt
         prompts = []
-        community_labels = []
         community_info = []
 
         for community_id, node_indices in valid_communities.items():
+            # 计算社区中心作为prompt
             community_features = all_features[node_indices]
             community_prompt = np.mean(community_features, axis=0)
-            community_prompt = community_prompt / np.linalg.norm(community_prompt)  # Normalize
+            community_prompt = community_prompt / np.linalg.norm(community_prompt)
 
-            # Get most common label in this community
-            community_label_counts = {}
-            for idx in node_indices:
-                label = all_labels[idx]
-                if label not in community_label_counts:
-                    community_label_counts[label] = 0
-                community_label_counts[label] += 1
+            # 分析社区的标签分布
+            community_labels = all_labels[node_indices]
+            label_counts = {}
+            for label in community_labels:
+                label_counts[label] = label_counts.get(label, 0) + 1
 
-            most_common_label = max(community_label_counts.items(), key=lambda x: x[1])[0]
-            purity = community_label_counts[most_common_label] / len(node_indices)
+            most_common_label = max(label_counts.items(), key=lambda x: x[1])[0]
+            purity = label_counts[most_common_label] / len(node_indices)
 
             prompts.append(community_prompt)
-            community_labels.append(most_common_label)
             community_info.append({
+                'community_id': community_id,
                 'size': len(node_indices),
                 'most_common_label': most_common_label,
-                'purity': purity
+                'purity': purity,
+                'label_distribution': label_counts
             })
 
-        initial_prompts = torch.tensor(np.array(prompts), dtype=torch.float32).to(self.device)
+        # 第七步：初始化可学习的prompt参数
+        if prompts:
+            initial_prompts = torch.tensor(np.array(prompts), dtype=torch.float32).to(self.device)
+            self._initialize_learnable_prompts(initial_prompts)
+            self.community_info = community_info
 
-        # 初始化可学习的prompts
-        self._initialize_learnable_prompts(initial_prompts)
+            logger.info(f"Successfully created {self.num_prompts} learnable prompts from communities")
 
-        # Log community statistics
-        logger.info(f"Created prompt pool with {self.num_prompts} learnable prompts")
+            # 计算平均纯度
+            avg_purity = np.mean([info['purity'] for info in community_info])
+            logger.info(f"Average community purity: {avg_purity:.4f}")
 
-        purities = [info['purity'] for info in community_info]
-        avg_purity = sum(purities) / len(purities) if purities else 0
-        logger.info(f"Community average purity: {avg_purity:.4f}")
-
-        # Create a visualization of community label distribution
-        label_distribution = np.zeros((self.num_prompts, num_classes))
-        for i, (community_id, node_indices) in enumerate(list(valid_communities.items())[:self.num_prompts]):
-            for idx in node_indices:
-                label = all_labels[idx]
-                label_distribution[i, label] += 1
-            # Normalize by community size
-            label_distribution[i] /= len(node_indices)
+        else:
+            logger.warning("No valid communities found, using K-means fallback")
+            return self._fallback_kmeans_initialization(all_features, num_classes, logger)
 
         return {
             'num_prompts': self.num_prompts,
             'community_info': community_info,
-            'label_distribution': label_distribution,
-            'Communities avg purity': avg_purity,
-            'adjacency_matrix': adjacency_matrix
+            'avg_purity': avg_purity,
+            'adjacency_matrix': adjacency_matrix,
+            'method': 'community_detection'
         }
 
-    def update_prompt_pool_incrementally(self, model, data_loader, similarity_threshold=0.8,
-                                         ema_alpha=0.9, logger=None):
+    def _fallback_kmeans_initialization(self, all_features, num_classes, logger):
         """
-        以增量方式更新prompt pool - 现在包含learnable prompts的处理
+        当社区检测失败时的备用K-means初始化方法
         """
-        if logger:
-            logger.info("Starting incremental prompt pool update with learnable prompts...")
+        logger.info("Using K-means clustering as fallback initialization...")
 
-        model.eval()
+        # 使用K-means聚类
+        n_clusters = min(num_classes * 2, 50, len(all_features) // 10)
+        n_clusters = max(n_clusters, 5)  # 至少5个cluster
 
-        # 1. 提取当前session所有样本的特征
-        all_features = []
-        sample_count = 0
+        if len(all_features) < n_clusters:
+            logger.warning(f"Too few samples ({len(all_features)}) for {n_clusters} clusters")
+            n_clusters = max(1, len(all_features) // 2)
 
-        with torch.no_grad():
-            for batch_idx, batch in enumerate(tqdm(data_loader, desc="Extracting features")):
-                try:
-                    if len(batch) >= 3:
-                        if isinstance(batch[0], list):
-                            images = batch[0][0].to(self.device)
-                            sample_count += len(images)
-                        else:
-                            images = batch[0].to(self.device)
-                            sample_count += len(images)
-                    else:
-                        if logger:
-                            logger.warning(f"Unexpected batch format at index {batch_idx}")
-                        continue
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        cluster_centers = kmeans.fit(all_features).cluster_centers_
 
-                    # 从backbone提取特征
-                    features = model.backbone(images)
-                    features = F.normalize(features, dim=1)
-                    all_features.append(features.cpu())
+        # 归一化聚类中心
+        cluster_centers = cluster_centers / np.linalg.norm(cluster_centers, axis=1, keepdims=True)
 
-                except Exception as e:
-                    if logger:
-                        logger.error(f"Error processing batch {batch_idx}: {str(e)}")
-                    continue
+        # 初始化prompt参数
+        initial_prompts = torch.tensor(cluster_centers, dtype=torch.float32).to(self.device)
+        self._initialize_learnable_prompts(initial_prompts)
 
-        if not all_features:
-            if logger:
-                logger.error("No features extracted. Cannot update prompt pool.")
-            return {"error": "No features extracted"}
-
-        all_features = torch.cat(all_features, dim=0)
-        if logger:
-            logger.info(f"Extracted features from {len(all_features)} samples")
-
-        # 2. 计算样本特征与现有prompts的相似度
-        if self.prompts is not None:
-            prompts = F.normalize(self.prompts, dim=1)
-            similarities = all_features @ prompts.cpu().T  # [N_samples, N_prompts]
-
-            # 3. 对每个样本，找到最相似的prompt
-            max_similarities, most_similar_prompt_idxs = torch.max(similarities, dim=1)
-
-            # 4. 分离属于已知类和新类的样本
-            known_class_mask = max_similarities >= similarity_threshold
-            unknown_class_mask = ~known_class_mask
-
-            known_features = all_features[known_class_mask]
-            unknown_features = all_features[unknown_class_mask]
-
-            if logger:
-                logger.info(f"Identified {known_features.shape[0]} samples from known classes")
-                logger.info(f"Identified {unknown_features.shape[0]} samples from potentially new classes")
-
-            # 5. 对于已知类样本，记录用于后续的EMA更新（在训练过程中进行）
-            # 这里我们主要处理新类样本的prompt生成
-
-        else:
-            unknown_features = all_features
-            if logger:
-                logger.info("No existing prompts, treating all samples as unknown")
-
-        # 6. 对新类样本进行社区发现并生成新prompts
-        new_prompts = []
-        detected_communities = 0
-
-        if len(unknown_features) > 0:
-            try:
-                unknown_features_np = unknown_features.numpy()
-                unknown_similarity_matrix = unknown_features @ unknown_features.T
-                unknown_similarity_matrix = unknown_similarity_matrix.numpy()
-
-                adjacency_threshold = max(similarity_threshold * 0.9, 0.5)
-                adjacency_matrix = (unknown_similarity_matrix > adjacency_threshold).astype(np.int8)
-                np.fill_diagonal(adjacency_matrix, 0)
-
-                import networkx as nx
-                import community as community_louvain
-
-                G = nx.from_numpy_array(adjacency_matrix)
-
-                if G.number_of_nodes() > 0:
-                    partition = community_louvain.best_partition(G)
-                    communities = {}
-                    for node, community_id in partition.items():
-                        if community_id not in communities:
-                            communities[community_id] = []
-                        communities[community_id].append(node)
-
-                    min_community_size = max(self.min_community_size, 3)
-                    valid_communities = {k: v for k, v in communities.items() if len(v) >= min_community_size}
-                    detected_communities = len(valid_communities)
-
-                    if logger:
-                        logger.info(f"Detected {detected_communities} valid communities from new class samples")
-
-                    for community_id, node_indices in valid_communities.items():
-                        community_features = unknown_features[node_indices]
-                        community_prompt = torch.mean(community_features, dim=0)
-                        community_prompt = F.normalize(community_prompt, dim=0)
-                        new_prompts.append(community_prompt)
-
-            except Exception as e:
-                if logger:
-                    logger.error(f"Error during community detection: {str(e)}")
-
-        # 7. 将新prompts添加到现有prompts中（作为可学习参数）
-        num_new_prompts_added = 0
-        if new_prompts and len(new_prompts) > 0:
-            try:
-                new_prompts_tensor = torch.stack(new_prompts)
-
-                # 检查是否超过最大prompt数量
-                total_prompts_after_adding = self.num_prompts + len(new_prompts_tensor)
-                if total_prompts_after_adding > self.max_prompts:
-                    # 只添加到最大数量
-                    max_new_prompts = self.max_prompts - self.num_prompts
-                    if max_new_prompts > 0:
-                        new_prompts_tensor = new_prompts_tensor[:max_new_prompts]
-                    else:
-                        new_prompts_tensor = torch.empty(0, self.feature_dim)
-
-                if len(new_prompts_tensor) > 0:
-                    # 检查与现有prompts的相似度，避免重复
-                    if self.prompts is not None:
-                        existing_prompts = F.normalize(self.prompts, dim=1)
-                        new_prompts_normalized = F.normalize(new_prompts_tensor, dim=1)
-                        cross_similarities = new_prompts_normalized @ existing_prompts.cpu().T
-                        max_cross_similarities, _ = torch.max(cross_similarities, dim=1)
-                        unique_threshold = similarity_threshold * 0.95
-                        unique_mask = max_cross_similarities < unique_threshold
-                        unique_new_prompts = new_prompts_tensor[unique_mask]
-                    else:
-                        unique_new_prompts = new_prompts_tensor
-
-                    num_new_prompts_added = len(unique_new_prompts)
-
-                    if num_new_prompts_added > 0:
-                        # 重新创建可学习参数
-                        if self.prompts is not None:
-                            old_prompts = self.prompts.data
-                            old_keys = self.prompt_keys.data
-
-                            new_total_prompts = torch.cat([old_prompts, unique_new_prompts.to(self.device)], dim=0)
-                            new_total_keys = torch.cat([old_keys, unique_new_prompts.to(self.device)], dim=0)
-                        else:
-                            new_total_prompts = unique_new_prompts.to(self.device)
-                            new_total_keys = unique_new_prompts.to(self.device)
-
-                        # 重新创建Parameter
-                        self.prompts = nn.Parameter(new_total_prompts)
-                        self.prompt_keys = nn.Parameter(new_total_keys)
-                        self.num_prompts = len(self.prompts)
-
-                        if logger:
-                            logger.info(f"Added {num_new_prompts_added} new learnable prompts to the pool")
-
-            except Exception as e:
-                if logger:
-                    logger.error(f"Error adding new prompts: {str(e)}")
-
-        if logger:
-            logger.info(f"Total prompts after update: {self.num_prompts}")
+        logger.info(f"Initialized {self.num_prompts} prompts using K-means clustering")
 
         return {
-            'num_new_prompts_added': num_new_prompts_added,
-            'detected_communities': detected_communities,
-            'total_prompts_after_update': self.num_prompts,
+            'num_prompts': self.num_prompts,
+            'community_info': [],
+            'avg_purity': 0.0,
+            'method': 'kmeans_fallback'
         }
+
+    def _initialize_learnable_prompts(self, initial_prompts):
+        """
+        从初始prompts初始化可学习的参数
+
+        Args:
+            initial_prompts: 初始prompt张量 [num_prompts, feature_dim]
+        """
+        if initial_prompts is not None:
+            self.num_prompts = min(len(initial_prompts), self.max_prompts)
+
+            # 初始化Key和Value参数
+            # Key：专门用于计算相似度，决定prompt选择
+            self.prompt_keys = nn.Parameter(
+                initial_prompts[:self.num_prompts].clone().detach()
+            )
+
+            # Value：专门用于特征增强
+            self.prompt_values = nn.Parameter(
+                initial_prompts[:self.num_prompts].clone().detach()
+            )
+
+            # 初始化使用统计
+            self.prompt_usage_stats = torch.zeros(self.num_prompts, device=self.device)
+
+            print(f"Initialized {self.num_prompts} learnable prompts with separate Keys and Values")
 
     def forward(self, features, top_k=5, return_attention=False):
         """
-        Forward pass for learnable prompt pool
+        Prompt pool的前向传播
 
         Args:
-            features: Input features [B, D]
-            top_k: Number of top prompts to use
-            return_attention: Whether to return attention weights
+            features: 输入特征 [B, D]
+            top_k: 选择的top-k prompt数量
+            return_attention: 是否返回注意力信息
 
         Returns:
-            enhanced_features: Enhanced features [B, D]
-            attention_weights: (optional) Attention weights [B, top_k]
+            enhanced_features: 增强后的特征 [B, D]
+            attention_info: (可选) 注意力相关信息
         """
-        if self.prompts is None or self.num_prompts == 0:
+        if self.prompt_keys is None or self.num_prompts == 0:
             if return_attention:
                 return features, None
             return features
@@ -532,45 +384,53 @@ class LearnablePromptPool(nn.Module):
         features_norm = F.normalize(features, dim=1)
         keys_norm = F.normalize(self.prompt_keys, dim=1)
 
-        # [B, num_prompts]
+        # 相似度矩阵 [B, num_prompts]
         similarity = features_norm @ keys_norm.T
 
         # 选择top-k个最相似的prompts
         top_k = min(top_k, self.num_prompts)
         top_k_values, top_k_indices = torch.topk(similarity, top_k, dim=1)
 
-        # 计算注意力权重
-        attention_weights = F.softmax(top_k_values / 0.1, dim=1)  # temperature=0.1
+        # 更新使用统计（仅在训练时）
+        if self.training:
+            with torch.no_grad():
+                for indices in top_k_indices:
+                    for idx in indices:
+                        self.prompt_usage_stats[idx] += 1
 
-        # 获取选中的prompts
-        selected_prompts = self.prompts[top_k_indices]  # [B, top_k, D]
+        # 计算注意力权重（使用较低的温度增强选择性）
+        attention_weights = F.softmax(top_k_values / 0.05, dim=1)
 
-        # 计算prompt contribution
-        # [B, top_k, 1] * [B, top_k, D] -> [B, top_k, D] -> [B, D]
+        # 获取选中的prompt values用于特征增强
+        selected_prompt_values = self.prompt_values[top_k_indices]  # [B, top_k, D]
+
+        # 计算加权的prompt contribution
         prompt_contribution = torch.sum(
-            attention_weights.unsqueeze(-1) * selected_prompts,
+            attention_weights.unsqueeze(-1) * selected_prompt_values,
             dim=1
         )
 
-        # 自适应增强：基于最高相似度动态调整增强强度
+        # 自适应增强策略：基于最高相似度动态调整增强强度
         max_similarity = top_k_values.max(dim=1)[0]  # [B]
-        enhancement_strength = torch.sigmoid(max_similarity * 2 - 1)  # 映射到(0,1)
+        enhancement_strength = torch.sigmoid(max_similarity * 3 - 1.5)
 
-        # 增强特征
+        # 使用残差连接进行特征增强
         enhanced_features = features + enhancement_strength.unsqueeze(-1) * prompt_contribution
         enhanced_features = F.normalize(enhanced_features, dim=1)
 
         if return_attention:
-            return enhanced_features, {
+            attention_info = {
                 'attention_weights': attention_weights,
                 'selected_prompt_indices': top_k_indices,
                 'enhancement_strength': enhancement_strength,
-                'max_similarity': max_similarity
+                'max_similarity': max_similarity,
+                'prompt_contribution': prompt_contribution
             }
+            return enhanced_features, attention_info
 
         return enhanced_features
 
-    def compute_prompt_losses(self, features, enhanced_features, attention_info, targets=None):
+    def compute_prompt_losses(self, features, enhanced_features, attention_info, targets=None, logits=None):
         """
         计算prompt相关的训练损失
 
@@ -579,151 +439,278 @@ class LearnablePromptPool(nn.Module):
             enhanced_features: 增强后特征 [B, D]
             attention_info: 注意力信息字典
             targets: 目标标签 [B] (可选)
+            logits: 分类器输出 [B, num_classes] (可选)
 
         Returns:
-            Dict of losses
+            losses: 损失字典
         """
         losses = {}
+        device = features.device
 
-        if self.prompts is None or self.num_prompts == 0:
-            return {k: torch.tensor(0.0, device=features.device) for k in ['diversity', 'alignment', 'total']}
+        if self.prompt_keys is None or self.num_prompts == 0:
+            return {k: torch.tensor(0.0, device=device) for k in
+                    ['task_alignment', 'usage_efficiency', 'key_value_consistency', 'total']}
 
-        # 1. Prompt diversity loss - 防止prompts收敛到相同值
-        if self.num_prompts > 1:
-            prompt_similarities = F.cosine_similarity(
-                self.prompts.unsqueeze(1),
-                self.prompts.unsqueeze(0),
-                dim=2
-            )
-            # 移除对角线（自相似度）
-            mask = ~torch.eye(self.num_prompts, dtype=torch.bool, device=self.prompts.device)
-            off_diagonal_similarities = prompt_similarities[mask]
-            # 我们希望prompts之间的相似度尽可能小
-            diversity_loss = off_diagonal_similarities.mean()
+        # 1. 任务对齐损失：确保prompt增强真正有助于分类任务
+        task_alignment_loss = torch.tensor(0.0, device=device)
+
+        if logits is not None and targets is not None:
+            # 计算分类置信度的改进
+            enhanced_predictions = F.softmax(logits, dim=1)
+            predicted_classes = logits.argmax(dim=1)
+
+            # 对于预测正确的样本，我们希望增强后的置信度更高
+            correct_mask = (predicted_classes == targets)
+            if correct_mask.any():
+                correct_confidences = enhanced_predictions[correct_mask, targets[correct_mask]]
+                # 使用负对数似然鼓励高置信度
+                task_alignment_loss = -torch.log(correct_confidences + 1e-8).mean()
         else:
-            diversity_loss = torch.tensor(0.0, device=features.device)
+            # 备用方案：确保增强后的特征与原始特征保持合理的相关性
+            feature_similarity = F.cosine_similarity(features, enhanced_features, dim=1)
+            target_similarity = 0.85
+            task_alignment_loss = F.mse_loss(feature_similarity,
+                                             torch.full_like(feature_similarity, target_similarity))
 
-        # 2. Feature alignment loss - 确保增强有助于特征区分
-        # 计算增强前后特征的余弦相似度，希望它们相关但不完全相同
-        feature_alignment = F.cosine_similarity(features, enhanced_features, dim=1)
-        # 我们希望相似度在一个合理范围内（0.7-0.95）
-        target_similarity = 0.85
-        alignment_loss = F.mse_loss(feature_alignment,
-                                    torch.full_like(feature_alignment, target_similarity))
+        # 2. 使用效率损失：鼓励合理的注意力分布
+        usage_efficiency_loss = torch.tensor(0.0, device=device)
 
-        # 3. Attention concentration loss - 防止注意力过于分散
         if attention_info is not None and 'attention_weights' in attention_info:
             attention_weights = attention_info['attention_weights']  # [B, top_k]
-            # 计算注意力的熵，希望不要太分散
+
+            # 计算注意力熵，避免过度集中或过度分散
             attention_entropy = -torch.sum(attention_weights * torch.log(attention_weights + 1e-8), dim=1)
-            concentration_loss = attention_entropy.mean()
-        else:
-            concentration_loss = torch.tensor(0.0, device=features.device)
+            # 目标熵：略低于uniform分布的熵，鼓励适度的专门化
+            target_entropy = np.log(attention_weights.shape[1]) * 0.7
+            usage_efficiency_loss = F.mse_loss(attention_entropy,
+                                               torch.full_like(attention_entropy, target_entropy))
 
-        # 4. 如果有标签，计算prompt-target consistency loss
-        consistency_loss = torch.tensor(0.0, device=features.device)
-        if targets is not None and attention_info is not None:
-            # 相同标签的样本应该倾向于选择相似的prompts
-            selected_indices = attention_info['selected_prompt_indices']  # [B, top_k]
+        # 3. Key-Value一致性损失：防止Key和Value过度分化
+        key_value_consistency_loss = torch.tensor(0.0, device=device)
 
-            # 计算样本对之间的标签相似度和prompt选择相似度
-            batch_size = targets.shape[0]
-            if batch_size > 1:
-                label_similarity = (targets.unsqueeze(1) == targets.unsqueeze(0)).float()
+        if self.num_prompts > 1:
+            # 计算Key和Value之间的相似度
+            keys_norm = F.normalize(self.prompt_keys, dim=1)
+            values_norm = F.normalize(self.prompt_values, dim=1)
 
-                # 计算prompt选择的相似度（基于选中的prompt indices）
-                prompt_selection_similarity = torch.zeros_like(label_similarity)
-                for i in range(batch_size):
-                    for j in range(batch_size):
-                        if i != j:
-                            # 计算两个样本选中的prompts的重叠度
-                            intersection = len(set(selected_indices[i].cpu().numpy()) &
-                                               set(selected_indices[j].cpu().numpy()))
-                            union = len(set(selected_indices[i].cpu().numpy()) |
-                                        set(selected_indices[j].cpu().numpy()))
-                            prompt_selection_similarity[i, j] = intersection / union if union > 0 else 0
-
-                # 希望标签相似的样本选择相似的prompts
-                consistency_loss = F.mse_loss(prompt_selection_similarity, label_similarity)
-
-        # 5. Feature-Prompt 对齐损失 - 拉近选中的prompts与对应特征的距离
-        # feature_prompt_loss = torch.tensor(0.0, device=features.device)
-        # if attention_info is not None and 'selected_prompt_indices' in attention_info:
-        #     selected_indices = attention_info['selected_prompt_indices']  # [B, top_k]
-        #     attention_weights = attention_info['attention_weights']  # [B, top_k]
-        #
-        #     batch_size = features.shape[0]
-        #     selected_prompts = self.prompts[selected_indices]  # [B, top_k, D]
-        #
-        #     # 计算每个特征与其选中的prompts之间的余弦相似度
-        #     features_expanded = features.unsqueeze(1)  # [B, 1, D]
-        #     cosine_sim = F.cosine_similarity(features_expanded, selected_prompts, dim=2)  # [B, top_k]
-        #
-        #     # 使用注意力权重作为权重，计算加权的相似度损失
-        #     # 我们希望最大化相似度，所以使用 1-similarity 作为损失
-        #     feature_prompt_loss = torch.sum((1 - cosine_sim) * attention_weights) / batch_size
-
+            key_value_similarity = torch.sum(keys_norm * values_norm, dim=1)
+            # 我们希望Key和Value保持一定的相关性，但不要完全相同
+            target_similarity = 0.7
+            key_value_consistency_loss = F.mse_loss(key_value_similarity,
+                                                    torch.full_like(key_value_similarity, target_similarity))
 
         # 组合所有损失
-        losses['diversity'] = self.diversity_weight * diversity_loss
-        losses['alignment'] = self.alignment_weight * alignment_loss
-        losses['concentration'] = 0.02 * concentration_loss  # 较小的权重
-        losses['consistency'] = 0.05 * consistency_loss  # 较小的权重
-        # losses['feature_prompt'] = 0.1 * feature_prompt_loss  # 权重可调整
-
-        losses['total'] = sum(losses.values())
+        losses['task_alignment'] = self.task_alignment_weight * task_alignment_loss
+        losses['usage_efficiency'] = self.usage_efficiency_weight * usage_efficiency_loss
+        losses['key_value_consistency'] = self.key_value_consistency_weight * key_value_consistency_loss
+        losses['total'] = losses['task_alignment'] + losses['usage_efficiency'] + losses['key_value_consistency']
 
         return losses
 
+    def update_prompt_pool_incrementally(self, model, data_loader, similarity_threshold=0.8,
+                                         ema_alpha=0.9, logger=None):
+        """
+        增量更新prompt pool
+
+        Args:
+            model: 当前模型
+            data_loader: 新数据的加载器
+            similarity_threshold: 相似度阈值
+            ema_alpha: EMA系数（暂未使用）
+            logger: 日志记录器
+
+        Returns:
+            update_stats: 更新统计信息
+        """
+        if logger:
+            logger.info("Starting incremental prompt pool update...")
+
+        model.eval()
+        all_features = []
+
+        # 提取新数据的特征
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(data_loader):
+                try:
+                    if len(batch) >= 3:
+                        if isinstance(batch[0], list):
+                            images = batch[0][0].to(self.device)
+                        else:
+                            images = batch[0].to(self.device)
+                    else:
+                        continue
+
+                    features = model.backbone(images)
+                    features = F.normalize(features, dim=1)
+                    all_features.append(features.cpu())
+
+                except Exception as e:
+                    if logger:
+                        logger.error(f"Error processing batch {batch_idx}: {str(e)}")
+                    continue
+
+        if not all_features:
+            return {"error": "No features extracted"}
+
+        all_features = torch.cat(all_features, dim=0)
+
+        if logger:
+            logger.info(f"Extracted features from {len(all_features)} samples")
+
+        # 评估现有prompt pool的覆盖情况
+        well_covered_ratio = 1.0
+
+        if self.prompt_keys is not None:
+            keys_norm = F.normalize(self.prompt_keys, dim=1)
+            similarities = all_features @ keys_norm.cpu().T
+
+            max_similarities, _ = torch.max(similarities, dim=1)
+            well_covered_ratio = (max_similarities >= similarity_threshold).float().mean()
+
+            if logger:
+                logger.info(f"Current prompts cover {well_covered_ratio:.2%} of new samples")
+
+        # 只有当覆盖率不足时才添加新prompt
+        num_new_prompts_added = 0
+
+        if well_covered_ratio < 0.8:  # 如果覆盖率低于80%
+            # 找到覆盖不好的样本
+            poorly_covered_mask = max_similarities < similarity_threshold
+            poorly_covered_features = all_features[poorly_covered_mask]
+
+            if len(poorly_covered_features) > 20:  # 确保有足够的样本
+                # 对这些样本进行K-means聚类
+                n_new_clusters = min(5, len(poorly_covered_features) // 15)
+                if n_new_clusters > 0:
+                    kmeans = KMeans(n_clusters=n_new_clusters, random_state=42)
+                    cluster_centers = kmeans.fit(poorly_covered_features.numpy()).cluster_centers_
+
+                    # 归一化新的prompt
+                    cluster_centers = cluster_centers / np.linalg.norm(cluster_centers, axis=1, keepdims=True)
+                    new_prompts = torch.tensor(cluster_centers, dtype=torch.float32).to(self.device)
+
+                    # 检查是否超过最大prompt数量
+                    total_prompts_after_adding = self.num_prompts + len(new_prompts)
+                    if total_prompts_after_adding <= self.max_prompts:
+                        # 扩展现有的prompt参数
+                        old_keys = self.prompt_keys.data
+                        old_values = self.prompt_values.data
+
+                        new_total_keys = torch.cat([old_keys, new_prompts], dim=0)
+                        new_total_values = torch.cat([old_values, new_prompts], dim=0)
+
+                        # 重新创建Parameter
+                        self.prompt_keys = nn.Parameter(new_total_keys)
+                        self.prompt_values = nn.Parameter(new_total_values)
+                        self.num_prompts = len(self.prompt_keys)
+
+                        # 扩展使用统计
+                        old_stats = self.prompt_usage_stats
+                        new_stats = torch.zeros(len(new_prompts), device=self.device)
+                        self.prompt_usage_stats = torch.cat([old_stats, new_stats])
+
+                        num_new_prompts_added = len(new_prompts)
+
+                        if logger:
+                            logger.info(f"Added {num_new_prompts_added} new prompts to the pool")
+
+        return {
+            'num_new_prompts_added': num_new_prompts_added,
+            'total_prompts_after_update': self.num_prompts,
+            'well_covered_ratio': well_covered_ratio.item()
+        }
+
+    def get_prompt_parameters(self):
+        """获取所有prompt相关的参数"""
+        params = []
+        if self.prompt_keys is not None:
+            params.append(self.prompt_keys)
+        if self.prompt_values is not None:
+            params.append(self.prompt_values)
+        return params
+
     def save_prompt_pool(self, save_path):
-        """Save learnable prompt pool to disk"""
+        """保存prompt pool到磁盘"""
         prompt_pool_dict = {
-            'prompts': self.prompts.cpu() if self.prompts is not None else None,
             'prompt_keys': self.prompt_keys.cpu() if self.prompt_keys is not None else None,
+            'prompt_values': self.prompt_values.cpu() if self.prompt_values is not None else None,
             'num_prompts': self.num_prompts,
             'feature_dim': self.feature_dim,
-            'min_community_size': self.min_community_size,
-            'similarity_threshold': self.similarity_threshold,
-            'community_ratio': self.community_ratio,
+            'prompt_usage_stats': self.prompt_usage_stats.cpu() if self.prompt_usage_stats is not None else None,
+            'community_info': self.community_info,
+            'task_alignment_weight': self.task_alignment_weight,
+            'usage_efficiency_weight': self.usage_efficiency_weight,
+            'key_value_consistency_weight': self.key_value_consistency_weight,
             'max_prompts': self.max_prompts,
-            'prompt_learning_weight': self.prompt_learning_weight,
-            'diversity_weight': self.diversity_weight,
-            'alignment_weight': self.alignment_weight
+            'similarity_threshold': self.similarity_threshold
         }
         torch.save(prompt_pool_dict, save_path)
 
     def load_prompt_pool(self, load_path, device=None):
-        """Load learnable prompt pool from disk"""
+        """从磁盘加载prompt pool"""
         if device:
             self.device = device
 
         prompt_pool_dict = torch.load(load_path, map_location=self.device)
 
-        if prompt_pool_dict['prompts'] is not None:
-            self.prompts = nn.Parameter(prompt_pool_dict['prompts'].to(self.device))
+        if prompt_pool_dict['prompt_keys'] is not None:
             self.prompt_keys = nn.Parameter(prompt_pool_dict['prompt_keys'].to(self.device))
+            self.prompt_values = nn.Parameter(prompt_pool_dict['prompt_values'].to(self.device))
         else:
-            self.prompts = None
             self.prompt_keys = None
+            self.prompt_values = None
 
         self.num_prompts = prompt_pool_dict['num_prompts']
         self.feature_dim = prompt_pool_dict['feature_dim']
-        self.min_community_size = prompt_pool_dict['min_community_size']
-        self.similarity_threshold = prompt_pool_dict['similarity_threshold']
-        self.community_ratio = prompt_pool_dict['community_ratio']
+        self.community_info = prompt_pool_dict.get('community_info', [])
 
-        # 加载训练相关参数（兼容旧版本）
+        # 加载使用统计
+        if 'prompt_usage_stats' in prompt_pool_dict and prompt_pool_dict['prompt_usage_stats'] is not None:
+            self.prompt_usage_stats = prompt_pool_dict['prompt_usage_stats'].to(self.device)
+        else:
+            self.prompt_usage_stats = torch.zeros(self.num_prompts,
+                                                  device=self.device) if self.num_prompts > 0 else None
+
+        # 加载权重配置
+        self.task_alignment_weight = prompt_pool_dict.get('task_alignment_weight', 0.8)
+        self.usage_efficiency_weight = prompt_pool_dict.get('usage_efficiency_weight', 0.2)
+        self.key_value_consistency_weight = prompt_pool_dict.get('key_value_consistency_weight', 0.1)
         self.max_prompts = prompt_pool_dict.get('max_prompts', 200)
-        self.prompt_learning_weight = prompt_pool_dict.get('prompt_learning_weight', 0.1)
-        self.diversity_weight = prompt_pool_dict.get('diversity_weight', 0.05)
-        self.alignment_weight = prompt_pool_dict.get('alignment_weight', 0.1)
+        self.similarity_threshold = prompt_pool_dict.get('similarity_threshold', 0.6)
 
     def enhance_features(self, features, top_k=5):
-        """
-        向后兼容的特征增强接口
-        """
+        """向后兼容的接口"""
         return self.forward(features, top_k=top_k, return_attention=False)
 
+    def get_prompt_statistics(self):
+        """获取prompt pool的统计信息"""
+        stats = {
+            'num_prompts': self.num_prompts,
+            'feature_dim': self.feature_dim,
+            'max_prompts': self.max_prompts
+        }
 
-# 为了兼容，保留原来的PromptPool类名
+        if self.prompt_usage_stats is not None:
+            usage_stats = self.prompt_usage_stats
+            stats.update({
+                'most_used_prompt_usage': usage_stats.max().item(),
+                'least_used_prompt_usage': usage_stats.min().item(),
+                'average_usage': usage_stats.mean().item(),
+                'unused_prompts': (usage_stats == 0).sum().item(),
+                'usage_std': usage_stats.std().item()
+            })
+
+        if self.community_info:
+            purities = [info['purity'] for info in self.community_info]
+            sizes = [info['size'] for info in self.community_info]
+            stats.update({
+                'avg_community_purity': np.mean(purities),
+                'avg_community_size': np.mean(sizes),
+                'num_communities': len(self.community_info)
+            })
+
+        return stats
+
+
+# 为了兼容性，保留原来的类名
 PromptPool = LearnablePromptPool

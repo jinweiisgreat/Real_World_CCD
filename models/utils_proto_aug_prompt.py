@@ -10,6 +10,12 @@ import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
 
+
+
+
+
+
+
 class ProtoAugManager:
     def __init__(self, feature_dim, batch_size, hardness_temp, radius_scale, device, logger):
         self.feature_dim = feature_dim
@@ -22,6 +28,7 @@ class ProtoAugManager:
         self.radius_scale = radius_scale
         self.logger = logger
 
+
     def save_proto_aug_dict(self, save_path):
         proto_aug_dict = {
             'prototypes': self.prototypes,
@@ -32,6 +39,7 @@ class ProtoAugManager:
 
     def load_proto_aug_dict(self, load_path):
         proto_aug_dict = torch.load(load_path)
+
         self.prototypes = proto_aug_dict['prototypes']
         self.radius = proto_aug_dict['radius']
         self.mean_similarity = proto_aug_dict['mean_similarity']

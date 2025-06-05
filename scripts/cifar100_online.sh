@@ -4,7 +4,7 @@
 set -e
 set -x
 
-CUDA_VISIBLE_DEVICES=0 python train_happy.py \
+CUDA_VISIBLE_DEVICES=0 python train.py \
     --dataset_name 'cifar100' \
     --batch_size 128 \
     --transform 'imagenet' \
@@ -32,4 +32,5 @@ CUDA_VISIBLE_DEVICES=0 python train_happy.py \
     --load_offline_id Old50_Ratio0.8_20250513-155706 \
     --shuffle_classes \
     --seed 0 \
+    --prompt_pool\
     --enable_prompt_training

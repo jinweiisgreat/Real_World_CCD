@@ -1,3 +1,10 @@
+"""
+第二步改进：修改PromptEnhancedModel以支持真正的任务驱动训练
+主要改动：
+1. 增加原始特征的计算路径，用于对比分析
+2. 改进prompt损失计算，引入分类任务的直接反馈
+3. 建立更紧密的prompt-task联系
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,154 +19,184 @@ class PromptEnhancedModel(nn.Module):
         self.top_k = top_k
         self.enable_prompt_training = enable_prompt_training
 
-        # 用于存储最后一次的attention信息，用于计算prompt损失
-        self.last_attention_info = None
+        # 用于存储最后一次的计算信息
+        self.last_computation_info = None
 
-    def forward(self, x, return_prompt_info=False):
+    def forward(self, x, return_prompt_info=False, return_original_logits=False):
         """
-        Forward pass with optional prompt enhancement
+        改进的前向传播，支持更详细的信息返回
 
         Args:
-            x: Input images [B, C, H, W]
-            return_prompt_info: Whether to return prompt-related information
+            x: 输入图像 [B, C, H, W]
+            return_prompt_info: 是否返回prompt相关信息
+            return_original_logits: 是否返回未增强特征的logits（用于对比）
 
         Returns:
-            proj_features: Projected features
-            logits: Classification logits
-            prompt_info: (optional) Dictionary containing prompt-related information
+            proj_features: 投影特征
+            logits: 分类logits
+            prompt_info: (可选) prompt相关信息
+            original_logits: (可选) 原始特征的logits
         """
-        # Extract features from backbone
-        features = self.backbone(x)
+        # 从backbone提取原始特征
+        original_features = self.backbone(x)
 
-        # Enhance features using prompt pool if available and enabled
-        enhanced_features = features
+        # 存储计算信息
+        computation_info = {
+            'original_features': original_features,
+            'enhanced_features': original_features,  # 默认值
+            'attention_info': None,
+            'enhancement_applied': False
+        }
+
+        enhanced_features = original_features
         attention_info = None
 
+        # 如果启用prompt并且prompt_pool存在，则进行特征增强
         if self.prompt_pool is not None and self.enable_prompt_training:
-            if hasattr(self.prompt_pool, 'forward'):
-                # 使用新的可学习prompt pool
-                enhanced_features, attention_info = self.prompt_pool.forward(
-                    features, top_k=self.top_k, return_attention=True
-                )
-            else:
-                # 向后兼容：使用旧的enhance_features方法
-                enhanced_features = self.prompt_pool.enhance_features(features, top_k=self.top_k)
+            enhanced_features, attention_info = self.prompt_pool.forward(
+                original_features, top_k=self.top_k, return_attention=True
+            )
+            computation_info['enhanced_features'] = enhanced_features
+            computation_info['attention_info'] = attention_info
+            computation_info['enhancement_applied'] = True
 
-        # 存储attention信息用于损失计算
-        self.last_attention_info = attention_info
-
-        # Pass through projector
+        # 通过projector得到最终输出
         proj_features, logits = self.projector(enhanced_features)
 
+        # 存储信息供后续使用
+        self.last_computation_info = computation_info
+
+        # 准备返回值
+        return_values = [proj_features, logits]
+
+        # 如果需要返回原始logits（用于效果对比）
+        if return_original_logits:
+            with torch.no_grad():
+                original_proj_features, original_logits = self.projector(original_features)
+            return_values.append(original_logits)
+
+        # 如果需要返回prompt信息
         if return_prompt_info:
             prompt_info = {
-                'original_features': features,
+                'original_features': original_features,
                 'enhanced_features': enhanced_features,
                 'attention_info': attention_info,
                 'enhancement_applied': self.prompt_pool is not None and self.enable_prompt_training
             }
-            return proj_features, logits, prompt_info
+            return_values.append(prompt_info)
 
-        return proj_features, logits
-
-    def compute_prompt_losses(self, targets=None):
-        """
-        计算prompt相关的损失
-
-        Args:
-            targets: 目标标签 [B] (可选)
-
-        Returns:
-            Dictionary of prompt losses
-        """
-        if (self.prompt_pool is None or
-                not self.enable_prompt_training or
-                not hasattr(self.prompt_pool, 'compute_prompt_losses')):
-            return {
-                'diversity': torch.tensor(0.0, device=next(self.parameters()).device),
-                'alignment': torch.tensor(0.0, device=next(self.parameters()).device),
-                'total': torch.tensor(0.0, device=next(self.parameters()).device)
-            }
-
-        # 需要从上一次forward获取特征信息
-        if not hasattr(self, '_last_forward_info'):
-            return {
-                'diversity': torch.tensor(0.0, device=next(self.parameters()).device),
-                'alignment': torch.tensor(0.0, device=next(self.parameters()).device),
-                'total': torch.tensor(0.0, device=next(self.parameters()).device)
-            }
-
-        return self.prompt_pool.compute_prompt_losses(
-            features=self._last_forward_info['original_features'],
-            enhanced_features=self._last_forward_info['enhanced_features'],
-            attention_info=self.last_attention_info,
-            targets=targets
-        )
+        return tuple(return_values) if len(return_values) > 2 else (return_values[0], return_values[1])
 
     def forward_with_prompt_loss(self, x, targets=None):
         """
-        Forward pass that also computes prompt losses
+        改进的前向传播，同时计算任务驱动的prompt损失
 
         Args:
-            x: Input images [B, C, H, W]
-            targets: Target labels [B] (optional)
+            x: 输入图像 [B, C, H, W]
+            targets: 目标标签 [B] (可选)
 
         Returns:
-            proj_features: Projected features
-            logits: Classification logits
-            prompt_losses: Dictionary of prompt losses
+            proj_features: 投影特征
+            logits: 分类logits
+            prompt_losses: prompt损失字典
+            original_logits: 原始特征的logits（用于效果评估）
         """
-        # Extract features from backbone
-        features = self.backbone(x)
+        # 获取原始特征
+        original_features = self.backbone(x)
 
-        # Store for prompt loss computation
-        self._last_forward_info = {'original_features': features}
-
-        # Enhance features using prompt pool
-        enhanced_features = features
-        attention_info = None
-
-        if self.prompt_pool is not None and self.enable_prompt_training:
-            if hasattr(self.prompt_pool, 'forward'):
-                enhanced_features, attention_info = self.prompt_pool.forward(
-                    features, top_k=self.top_k, return_attention=True
-                )
-            else:
-                enhanced_features = self.prompt_pool.enhance_features(features, top_k=self.top_k)
-
-        # Store enhanced features
-        self._last_forward_info['enhanced_features'] = enhanced_features
-        self.last_attention_info = attention_info
-
-        # Pass through projector
-        proj_features, logits = self.projector(enhanced_features)
-
-        # Compute prompt losses
-        prompt_losses = {}
-        if (self.prompt_pool is not None and
-                self.enable_prompt_training and
-                hasattr(self.prompt_pool, 'compute_prompt_losses')):
-            prompt_losses = self.prompt_pool.compute_prompt_losses(
-                features=features,
-                enhanced_features=enhanced_features,
-                attention_info=attention_info,
-                targets=targets
-            )
-        else:
+        # 如果没有prompt pool，直接返回
+        if self.prompt_pool is None or not self.enable_prompt_training:
+            proj_features, logits = self.projector(original_features)
             device = next(self.parameters()).device
             prompt_losses = {
-                'diversity': torch.tensor(0.0, device=device),
-                'alignment': torch.tensor(0.0, device=device),
+                'task_alignment': torch.tensor(0.0, device=device),
+                'usage_efficiency': torch.tensor(0.0, device=device),
                 'total': torch.tensor(0.0, device=device)
             }
+            return proj_features, logits, prompt_losses, logits  # 返回相同的logits作为original_logits
 
-        return proj_features, logits, prompt_losses
+        # 进行prompt增强
+        enhanced_features, attention_info = self.prompt_pool.forward(
+            original_features, top_k=self.top_k, return_attention=True
+        )
+
+        # 计算增强后的输出
+        proj_features, enhanced_logits = self.projector(enhanced_features)
+
+        # 计算原始特征的输出（用于对比和损失计算）
+        with torch.no_grad():
+            _, original_logits = self.projector(original_features)
+
+        # 计算prompt损失，现在传入logits信息用于任务驱动的优化
+        prompt_losses = self.prompt_pool.compute_prompt_losses(
+            features=original_features,
+            enhanced_features=enhanced_features,
+            attention_info=attention_info,
+            targets=targets,
+            logits=enhanced_logits  # 传入分类器输出用于任务对齐
+        )
+
+        # 存储计算信息
+        self.last_computation_info = {
+            'original_features': original_features,
+            'enhanced_features': enhanced_features,
+            'attention_info': attention_info,
+            'enhancement_applied': True,
+            'original_logits': original_logits,
+            'enhanced_logits': enhanced_logits
+        }
+
+        return proj_features, enhanced_logits, prompt_losses, original_logits
+
+    def compute_enhancement_effectiveness(self, targets):
+        """
+        计算prompt增强的有效性指标
+
+        Args:
+            targets: 目标标签 [B]
+
+        Returns:
+            effectiveness_metrics: 有效性指标字典
+        """
+        if self.last_computation_info is None or not self.last_computation_info['enhancement_applied']:
+            return {'enhancement_applied': False}
+
+        original_logits = self.last_computation_info.get('original_logits')
+        enhanced_logits = self.last_computation_info.get('enhanced_logits')
+
+        if original_logits is None or enhanced_logits is None:
+            return {'enhancement_applied': False}
+
+        with torch.no_grad():
+            # 计算预测准确率的改进
+            original_preds = original_logits.argmax(dim=1)
+            enhanced_preds = enhanced_logits.argmax(dim=1)
+
+            original_correct = (original_preds == targets).float()
+            enhanced_correct = (enhanced_preds == targets).float()
+
+            # 计算置信度的改进
+            original_confidences = F.softmax(original_logits, dim=1)
+            enhanced_confidences = F.softmax(enhanced_logits, dim=1)
+
+            original_max_conf = original_confidences.max(dim=1)[0]
+            enhanced_max_conf = enhanced_confidences.max(dim=1)[0]
+
+            metrics = {
+                'enhancement_applied': True,
+                'accuracy_improvement': (enhanced_correct - original_correct).mean().item(),
+                'confidence_improvement': (enhanced_max_conf - original_max_conf).mean().item(),
+                'samples_helped': (enhanced_correct > original_correct).sum().item(),
+                'samples_hurt': (enhanced_correct < original_correct).sum().item(),
+                'total_samples': len(targets)
+            }
+
+        return metrics
 
     def enable_prompt_learning(self):
         """启用prompt学习"""
         self.enable_prompt_training = True
         if self.prompt_pool is not None:
-            # 确保prompt pool的参数可以被优化
             for param in self.prompt_pool.parameters():
                 param.requires_grad = True
 
@@ -167,14 +204,13 @@ class PromptEnhancedModel(nn.Module):
         """禁用prompt学习"""
         self.enable_prompt_training = False
         if self.prompt_pool is not None:
-            # 冻结prompt pool的参数
             for param in self.prompt_pool.parameters():
                 param.requires_grad = False
 
     def get_prompt_parameters(self):
         """获取prompt相关的参数，用于优化器"""
         if self.prompt_pool is not None and self.enable_prompt_training:
-            return list(self.prompt_pool.parameters())
+            return self.prompt_pool.get_prompt_parameters()
         return []
 
     def get_num_prompts(self):
@@ -195,5 +231,15 @@ class PromptEnhancedModel(nn.Module):
             'prompt_learning_enabled': self.enable_prompt_training,
             'prompt_parameters': sum(p.numel() for p in self.get_prompt_parameters()),
         }
+
+        # 如果有使用统计，添加统计信息
+        if hasattr(self.prompt_pool, 'prompt_usage_stats') and self.prompt_pool.prompt_usage_stats is not None:
+            usage_stats = self.prompt_pool.prompt_usage_stats
+            info.update({
+                'most_used_prompt_usage': usage_stats.max().item(),
+                'least_used_prompt_usage': usage_stats.min().item(),
+                'average_usage': usage_stats.mean().item(),
+                'unused_prompts': (usage_stats == 0).sum().item()
+            })
 
         return info
