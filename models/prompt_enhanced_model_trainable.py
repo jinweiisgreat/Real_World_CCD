@@ -148,51 +148,6 @@ class PromptEnhancedModel(nn.Module):
 
         return proj_features, enhanced_logits, prompt_losses, original_logits
 
-    def compute_enhancement_effectiveness(self, targets):
-        """
-        计算prompt增强的有效性指标
-
-        Args:
-            targets: 目标标签 [B]
-
-        Returns:
-            effectiveness_metrics: 有效性指标字典
-        """
-        if self.last_computation_info is None or not self.last_computation_info['enhancement_applied']:
-            return {'enhancement_applied': False}
-
-        original_logits = self.last_computation_info.get('original_logits')
-        enhanced_logits = self.last_computation_info.get('enhanced_logits')
-
-        if original_logits is None or enhanced_logits is None:
-            return {'enhancement_applied': False}
-
-        with torch.no_grad():
-            # 计算预测准确率的改进
-            original_preds = original_logits.argmax(dim=1)
-            enhanced_preds = enhanced_logits.argmax(dim=1)
-
-            original_correct = (original_preds == targets).float()
-            enhanced_correct = (enhanced_preds == targets).float()
-
-            # 计算置信度的改进
-            original_confidences = F.softmax(original_logits, dim=1)
-            enhanced_confidences = F.softmax(enhanced_logits, dim=1)
-
-            original_max_conf = original_confidences.max(dim=1)[0]
-            enhanced_max_conf = enhanced_confidences.max(dim=1)[0]
-
-            metrics = {
-                'enhancement_applied': True,
-                'accuracy_improvement': (enhanced_correct - original_correct).mean().item(),
-                'confidence_improvement': (enhanced_max_conf - original_max_conf).mean().item(),
-                'samples_helped': (enhanced_correct > original_correct).sum().item(),
-                'samples_hurt': (enhanced_correct < original_correct).sum().item(),
-                'total_samples': len(targets)
-            }
-
-        return metrics
-
     def enable_prompt_learning(self):
         """启用prompt学习"""
         self.enable_prompt_training = True

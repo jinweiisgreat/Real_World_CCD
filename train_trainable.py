@@ -170,18 +170,6 @@ def train_offline(student, train_loader, test_loader, args):
             # 总损失
             total_loss = main_loss + total_prompt_loss
 
-            # ========== 效果统计 ==========
-            if student.prompt_pool is not None and epoch > 10:  # 训练稳定后开始统计
-                effectiveness_metrics = student.compute_enhancement_effectiveness(class_labels)
-                if effectiveness_metrics.get('enhancement_applied', False):
-                    epoch_effectiveness_stats['samples_helped'] += effectiveness_metrics.get('samples_helped', 0)
-                    epoch_effectiveness_stats['samples_hurt'] += effectiveness_metrics.get('samples_hurt', 0)
-                    epoch_effectiveness_stats['total_samples'] += effectiveness_metrics.get('total_samples', 0)
-                    epoch_effectiveness_stats['accuracy_improvement'] += effectiveness_metrics.get(
-                        'accuracy_improvement', 0.0) * effectiveness_metrics.get('total_samples', 0)
-                    epoch_effectiveness_stats['confidence_improvement'] += effectiveness_metrics.get(
-                        'confidence_improvement', 0.0) * effectiveness_metrics.get('total_samples', 0)
-
             # ========== 反向传播和优化 ==========
             optimizer.zero_grad()
             total_loss.backward()
@@ -334,18 +322,6 @@ def test_offline(model, test_loader, epoch, save_name, args):
             targets.append(label.cpu().numpy())
             mask = np.append(mask,
                              np.array([True if x.item() in range(len(args.train_classes)) else False for x in label]))
-
-            # 统计prompt效果（如果启用）
-            if model.prompt_pool is not None and model.enable_prompt_training:
-                effectiveness_metrics = model.compute_enhancement_effectiveness(label.cuda())
-                if effectiveness_metrics.get('enhancement_applied', False):
-                    total_effectiveness_stats['samples_helped'] += effectiveness_metrics.get('samples_helped', 0)
-                    total_effectiveness_stats['samples_hurt'] += effectiveness_metrics.get('samples_hurt', 0)
-                    total_effectiveness_stats['total_samples'] += effectiveness_metrics.get('total_samples', 0)
-                    total_effectiveness_stats['accuracy_improvement'] += effectiveness_metrics.get(
-                        'accuracy_improvement', 0.0) * effectiveness_metrics.get('total_samples', 0)
-                    total_effectiveness_stats['confidence_improvement'] += effectiveness_metrics.get(
-                        'confidence_improvement', 0.0) * effectiveness_metrics.get('total_samples', 0)
 
     preds = np.concatenate(preds)
     targets = np.concatenate(targets)
@@ -548,16 +524,6 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             total_loss = main_loss + total_prompt_loss
 
             # ========== 效果统计 ==========
-            if student.prompt_pool is not None and epoch > 5:  # 在线阶段更早开始统计
-                effectiveness_metrics = student.compute_enhancement_effectiveness(class_labels)
-                if effectiveness_metrics.get('enhancement_applied', False):
-                    epoch_effectiveness_stats['samples_helped'] += effectiveness_metrics.get('samples_helped', 0)
-                    epoch_effectiveness_stats['samples_hurt'] += effectiveness_metrics.get('samples_hurt', 0)
-                    epoch_effectiveness_stats['total_samples'] += effectiveness_metrics.get('total_samples', 0)
-                    epoch_effectiveness_stats['accuracy_improvement'] += effectiveness_metrics.get(
-                        'accuracy_improvement', 0.0) * effectiveness_metrics.get('total_samples', 0)
-                    epoch_effectiveness_stats['confidence_improvement'] += effectiveness_metrics.get(
-                        'confidence_improvement', 0.0) * effectiveness_metrics.get('total_samples', 0)
 
             # ========== 反向传播和优化 ==========
             optimizer.zero_grad()
@@ -787,18 +753,6 @@ def test_online(model, test_loader, epoch, save_name, current_session, args):
                                                        else False for x in label]))
             mask_soft = np.append(mask_soft, np.array([True if x.item() in range(args.num_seen_classes)
                                                        else False for x in label]))
-
-            # 统计prompt效果（如果启用）
-            if model.prompt_pool is not None and model.enable_prompt_training:
-                effectiveness_metrics = model.compute_enhancement_effectiveness(label.cuda())
-                if effectiveness_metrics.get('enhancement_applied', False):
-                    total_effectiveness_stats['samples_helped'] += effectiveness_metrics.get('samples_helped', 0)
-                    total_effectiveness_stats['samples_hurt'] += effectiveness_metrics.get('samples_hurt', 0)
-                    total_effectiveness_stats['total_samples'] += effectiveness_metrics.get('total_samples', 0)
-                    total_effectiveness_stats['accuracy_improvement'] += effectiveness_metrics.get(
-                        'accuracy_improvement', 0.0) * effectiveness_metrics.get('total_samples', 0)
-                    total_effectiveness_stats['confidence_improvement'] += effectiveness_metrics.get(
-                        'confidence_improvement', 0.0) * effectiveness_metrics.get('total_samples', 0)
 
     preds = np.concatenate(preds)
     targets = np.concatenate(targets)

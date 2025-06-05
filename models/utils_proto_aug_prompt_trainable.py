@@ -120,11 +120,7 @@ class ProtoAugManager:
                     tqdm(train_loader, desc="Extracting features for prototypes")):
                 images = images.cuda(non_blocking=True)
                 with torch.no_grad():
-                    if isinstance(model, PromptEnhancedModel):
-                        feats = model.backbone(images)  # 直接使用backbone
-                    else:
-                        # 兼容原始Sequential模型
-                        feats = model[0](images)
+                    feats = model.backbone(images)  # 直接使用backbone
                     feats = torch.nn.functional.normalize(feats, dim=-1)
                     all_feats_list.append(feats)
                     all_labels_list.append(label)
