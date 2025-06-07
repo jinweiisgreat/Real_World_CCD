@@ -22,6 +22,59 @@ class PromptEnhancedModel(nn.Module):
         # 用于存储最后一次的计算信息
         self.last_computation_info = None
 
+    def load_state_dict(self, state_dict, strict=True):
+        """
+        重写 nn.Module 的 load_state_dict 方法，支持prompt pool的自适应加载
+        """
+        print("Using custom load_state_dict with prompt pool adaptation")
+
+        # 分离prompt pool相关的参数和其他参数
+        prompt_pool_keys = [k for k in state_dict.keys() if k.startswith('prompt_pool.')]
+        other_keys = [k for k in state_dict.keys() if not k.startswith('prompt_pool.')]
+
+        # 先加载非prompt pool的参数 - 调用父类方法
+        other_state_dict = {k: state_dict[k] for k in other_keys}
+        try:
+            # 调用父类的 load_state_dict
+            super().load_state_dict(other_state_dict, strict=False)
+            print("✓ Successfully loaded backbone and projector parameters")
+        except Exception as e:
+            print(f"✗ Error loading backbone/projector: {str(e)}")
+            if strict:
+                raise e
+
+        # 如果有prompt pool参数，进行自适应加载
+        if prompt_pool_keys and self.prompt_pool is not None:
+            print(f"Found {len(prompt_pool_keys)} prompt pool parameters to load")
+
+            # 提取prompt pool的参数（去掉'prompt_pool.'前缀）
+            prompt_pool_state_dict = {}
+            for key in prompt_pool_keys:
+                new_key = key.replace('prompt_pool.', '')
+                prompt_pool_state_dict[new_key] = state_dict[key]
+
+            # 使用自适应加载方法
+            if hasattr(self.prompt_pool, 'adaptive_load_state_dict'):
+                success = self.prompt_pool.adaptive_load_state_dict(prompt_pool_state_dict)
+                if success:
+                    print("✓ Successfully loaded prompt pool with adaptive method")
+                else:
+                    print("✗ Failed to load prompt pool, keeping current state")
+                    if strict:
+                        raise RuntimeError("Failed to load prompt pool parameters")
+            else:
+                print("✗ Prompt pool doesn't have adaptive_load_state_dict method")
+                if strict:
+                    raise RuntimeError("Prompt pool doesn't support adaptive loading")
+        elif prompt_pool_keys:
+            print("✗ Found prompt pool parameters but no prompt_pool in model")
+            if strict:
+                raise RuntimeError("State dict contains prompt pool parameters but model has no prompt_pool")
+        else:
+            print("No prompt pool parameters found in state dict")
+
+        return self  # 返回self以支持链式调用
+
     def forward(self, x, return_prompt_info=False, return_original_logits=False):
         """
         改进的前向传播，支持更详细的信息返回

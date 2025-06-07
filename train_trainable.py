@@ -99,23 +99,12 @@ def train_offline(student, train_loader, test_loader, args):
         args.teacher_temp,
     )
 
-    # 用于监控prompt效果的变量
-    prompt_effectiveness_history = []
     best_test_acc_old = 0
 
     for epoch in range(args.epochs_offline):
         loss_record = AverageMeter()
         prompt_loss_record = AverageMeter()
         main_loss_record = AverageMeter()
-
-        # 用于统计prompt效果
-        epoch_effectiveness_stats = {
-            'samples_helped': 0,
-            'samples_hurt': 0,
-            'total_samples': 0,
-            'accuracy_improvement': 0.0,
-            'confidence_improvement': 0.0
-        }
 
         student.train()
         # 启用prompt学习
@@ -185,30 +174,6 @@ def train_offline(student, train_loader, test_loader, args):
                                  .format(epoch, batch_idx, len(train_loader), total_loss.item(),
                                          main_loss.item(), total_prompt_loss.item()))
 
-        # ========== Epoch总结 ==========
-        # 计算平均效果统计
-        if epoch_effectiveness_stats['total_samples'] > 0:
-            avg_accuracy_improvement = epoch_effectiveness_stats['accuracy_improvement'] / epoch_effectiveness_stats[
-                'total_samples']
-            avg_confidence_improvement = epoch_effectiveness_stats['confidence_improvement'] / \
-                                         epoch_effectiveness_stats['total_samples']
-            net_help_ratio = (epoch_effectiveness_stats['samples_helped'] - epoch_effectiveness_stats['samples_hurt']) / \
-                             epoch_effectiveness_stats['total_samples']
-
-            prompt_effectiveness_history.append({
-                'epoch': epoch,
-                'avg_accuracy_improvement': avg_accuracy_improvement,
-                'avg_confidence_improvement': avg_confidence_improvement,
-                'net_help_ratio': net_help_ratio,
-                'samples_helped': epoch_effectiveness_stats['samples_helped'],
-                'samples_hurt': epoch_effectiveness_stats['samples_hurt']
-            })
-
-            args.logger.info(f'Prompt Effectiveness - Epoch {epoch}: '
-                             f'Acc Improvement: {avg_accuracy_improvement:.4f}, '
-                             f'Conf Improvement: {avg_confidence_improvement:.4f}, '
-                             f'Net Help Ratio: {net_help_ratio:.4f}')
-
         args.logger.info('Train Epoch: {} Avg Loss: {:.4f} Main Loss: {:.4f} Prompt Loss: {:.4f}'.format(
             epoch, loss_record.avg, main_loss_record.avg, prompt_loss_record.avg))
 
@@ -229,8 +194,7 @@ def train_offline(student, train_loader, test_loader, args):
         save_dict = {
             'model': student.state_dict(),
             'optimizer': optimizer.state_dict(),
-            'epoch': epoch + 1,
-            'prompt_effectiveness_history': prompt_effectiveness_history
+            'epoch': epoch + 1
         }
 
         torch.save(save_dict, args.model_path)
@@ -246,48 +210,46 @@ def train_offline(student, train_loader, test_loader, args):
         args.logger.info(f'Metrics with best model on test set: Old: {best_test_acc_old:.4f}')
         args.logger.info('\n')
 
-    # 训练结束后创建prompt pool（如果还没有的话）
-    if hasattr(args, 'prompt_pool') and args.prompt_pool is not None:
-        args.logger.info("Creating/updating prompt pool from offline training data...")
+    # 训练结束后创建prompt pool
+    args.logger.info("Creating prompt pool from offline training data...")
 
-        # 使用干净的数据加载器进行特征提取
-        clean_dataset = deepcopy(train_loader.dataset)
-        clean_dataset.transform = test_transform
-        clean_loader = DataLoader(
-            clean_dataset,
-            num_workers=args.num_workers_test,
-            batch_size=256,
-            shuffle=False,
-            pin_memory=False
+    # 使用干净的数据加载器进行特征提取
+    clean_dataset = deepcopy(train_loader.dataset)
+    clean_dataset.transform = test_transform
+    clean_loader = DataLoader(
+        clean_dataset,
+        num_workers=args.num_workers_test,
+        batch_size=256,
+        shuffle=False,
+        pin_memory=False
+    )
+
+    # 如果prompt pool还没有初始化，现在进行初始化
+    if args.prompt_pool.num_prompts == 0:
+        prompt_pool_stats = args.prompt_pool.create_prompt_pool(
+            model=student,
+            data_loader=clean_loader,
+            num_classes=args.num_labeled_classes,
+            logger=args.logger
+        )
+    else:
+        # 如果已经有了prompt pool，进行更新
+        prompt_pool_stats = args.prompt_pool.update_prompt_pool_incrementally(
+            model=student,
+            data_loader=clean_loader,
+            logger=args.logger
         )
 
-        # 如果prompt pool还没有初始化，现在进行初始化
-        if args.prompt_pool.num_prompts == 0:
-            prompt_pool_stats = args.prompt_pool.create_prompt_pool(
-                model=student,
-                data_loader=clean_loader,
-                num_classes=args.num_labeled_classes,
-                logger=args.logger
-            )
-        else:
-            # 如果已经有了prompt pool，进行更新
-            prompt_pool_stats = args.prompt_pool.update_prompt_pool_incrementally(
-                model=student,
-                data_loader=clean_loader,
-                logger=args.logger
-            )
+    # 保存prompt pool
+    prompt_pool_path = os.path.join(args.model_dir, 'prompt_pool.pt')
+    args.prompt_pool.save_prompt_pool(prompt_pool_path)
+    args.logger.info(f"Prompt pool saved to {prompt_pool_path}")
 
-        # 保存prompt pool
-        prompt_pool_path = os.path.join(args.model_dir, 'prompt_pool.pt')
-        args.prompt_pool.save_prompt_pool(prompt_pool_path)
-        args.logger.info(f"Prompt pool saved to {prompt_pool_path}")
-
-        # 保存统计信息
-        stats_path = os.path.join(args.model_dir, 'prompt_pool_stats.pt')
-        torch.save({
-            'prompt_pool_stats': prompt_pool_stats,
-            'prompt_effectiveness_history': prompt_effectiveness_history
-        }, stats_path)
+    # 保存统计信息
+    stats_path = os.path.join(args.model_dir, 'prompt_pool_stats.pt')
+    torch.save({
+        'prompt_pool_stats': prompt_pool_stats
+    }, stats_path)
 
     return best_test_acc_old
 
@@ -394,14 +356,14 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
     params_groups = get_params_groups(student)
 
     # 在线阶段给prompt更高的学习率，让其快速适应新数据
-    if prompt_params:
-        prompt_lr = args.lr * 0.8  # 在线阶段提高prompt学习率
-        params_groups.append({
-            'params': prompt_params,
-            'lr': prompt_lr,
-            'weight_decay': 0.0
-        })
-        args.logger.info(f"Added prompt parameters with lr={prompt_lr}")
+    # if prompt_params:
+    #     prompt_lr = args.lr * 0.8  # 在线阶段提高prompt学习率
+    #     params_groups.append({
+    #         'params': prompt_params,
+    #         'lr': prompt_lr,
+    #         'weight_decay': 0.0
+    #     })
+    #     args.logger.info(f"Added prompt parameters with lr={prompt_lr}")
 
     optimizer = SGD(params_groups, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
 

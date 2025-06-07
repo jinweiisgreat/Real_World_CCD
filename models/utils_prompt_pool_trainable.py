@@ -428,21 +428,14 @@ class LearnablePromptPool(nn.Module):
             }
             return enhanced_features, attention_info
 
+        print("已完成enhance")
+        print(prompt_contribution.data)
+
         return enhanced_features
 
     def compute_prompt_losses(self, features, enhanced_features, attention_info, targets=None, logits=None):
         """
         计算prompt相关的训练损失
-
-        Args:
-            features: 原始特征 [B, D]
-            enhanced_features: 增强后特征 [B, D]
-            attention_info: 注意力信息字典
-            targets: 目标标签 [B] (可选)
-            logits: 分类器输出 [B, num_classes] (可选)
-
-        Returns:
-            losses: 损失字典
         """
         losses = {}
         device = features.device
@@ -455,9 +448,20 @@ class LearnablePromptPool(nn.Module):
         task_alignment_loss = torch.tensor(0.0, device=device)
 
         if logits is not None and targets is not None:
-            # 计算分类置信度的改进
-            enhanced_predictions = F.softmax(logits, dim=1)
-            predicted_classes = logits.argmax(dim=1)
+            # 处理尺寸不匹配的问题
+            batch_size = targets.size(0)
+            n_views = logits.size(0) // batch_size  # 计算视图数量
+
+            if n_views > 1:
+                # 如果有多个视图，重新整形logits并只使用第一个视图进行评估
+                reshaped_logits = logits.view(n_views, batch_size, -1)
+                first_view_logits = reshaped_logits[0]  # 取第一个视图
+
+                enhanced_predictions = F.softmax(first_view_logits, dim=1)
+                predicted_classes = first_view_logits.argmax(dim=1)
+            else:
+                enhanced_predictions = F.softmax(logits, dim=1)
+                predicted_classes = logits.argmax(dim=1)
 
             # 对于预测正确的样本，我们希望增强后的置信度更高
             correct_mask = (predicted_classes == targets)
@@ -710,6 +714,94 @@ class LearnablePromptPool(nn.Module):
             })
 
         return stats
+
+    def adaptive_load_state_dict(self, state_dict_subset):
+        """加载state_dict中的prompt pool参数，处理大小不匹配的情况"""
+        try:
+            if 'prompt_keys' in state_dict_subset and 'prompt_values' in state_dict_subset:
+                prev_keys = state_dict_subset['prompt_keys']
+                prev_values = state_dict_subset['prompt_values']
+                prev_size = prev_keys.size(0)
+                current_size = self.prompt_keys.size(0) if self.prompt_keys is not None else 0
+
+                print(f"Loading prompt pool: prev_size={prev_size}, current_size={current_size}")
+
+                # 情况1: 加载的prompt pool比当前的小或相等
+                if prev_size <= current_size:
+                    self.prompt_keys.data[:prev_size].copy_(prev_keys.to(self.device))
+                    self.prompt_values.data[:prev_size].copy_(prev_values.to(self.device))
+                    print(f"Loaded {prev_size} prompts, keeping {current_size - prev_size} existing prompts")
+
+                # 情况2: 加载的prompt pool比当前的大
+                else:
+                    if current_size > 0:
+                        # 只加载能装下的部分
+                        self.prompt_keys.data.copy_(prev_keys[:current_size].to(self.device))
+                        self.prompt_values.data.copy_(prev_values[:current_size].to(self.device))
+                        print(f"Truncated loading: loaded {current_size} out of {prev_size} prompts")
+                    else:
+                        # 当前没有prompts，需要重新创建
+                        # 但这种情况下应该限制在max_prompts范围内
+                        actual_size = min(prev_size, getattr(self, 'max_prompts', 200))
+
+                        self.prompt_keys = nn.Parameter(
+                            prev_keys[:actual_size].clone().detach().to(self.device)
+                        )
+                        self.prompt_values = nn.Parameter(
+                            prev_values[:actual_size].clone().detach().to(self.device)
+                        )
+                        self.num_prompts = actual_size
+                        print(f"Recreated prompt pool with {actual_size} prompts")
+
+                # 更新使用统计
+                if 'prompt_usage_stats' in state_dict_subset:
+                    usage_stats = state_dict_subset['prompt_usage_stats']
+                    current_stats_size = self.num_prompts
+
+                    if hasattr(self, 'prompt_usage_stats') and self.prompt_usage_stats is not None:
+                        if len(usage_stats) >= current_stats_size:
+                            self.prompt_usage_stats.data.copy_(usage_stats[:current_stats_size].to(self.device))
+                        else:
+                            # 扩展使用统计
+                            self.prompt_usage_stats.data.zero_()
+                            self.prompt_usage_stats.data[:len(usage_stats)].copy_(usage_stats.to(self.device))
+                    else:
+                        # 创建新的使用统计
+                        self.prompt_usage_stats = torch.zeros(current_stats_size, device=self.device)
+                        if len(usage_stats) > 0:
+                            copy_size = min(len(usage_stats), current_stats_size)
+                            self.prompt_usage_stats[:copy_size].copy_(usage_stats[:copy_size].to(self.device))
+
+                return True
+
+        except Exception as e:
+            print(f"Error in adaptive_load_state_dict: {str(e)}")
+            return False
+
+        return False
+
+    def _update_usage_stats(self, usage_stats, device):
+        """更新使用统计的辅助方法"""
+        try:
+            current_stats_size = self.num_prompts
+
+            if hasattr(self, 'prompt_usage_stats') and self.prompt_usage_stats is not None:
+                if len(usage_stats) >= current_stats_size:
+                    self.prompt_usage_stats.data.copy_(usage_stats[:current_stats_size].to(device))
+                else:
+                    self.prompt_usage_stats.data.zero_()
+                    self.prompt_usage_stats.data[:len(usage_stats)].copy_(usage_stats.to(device))
+            else:
+                self.prompt_usage_stats = torch.zeros(current_stats_size, device=device)
+                if len(usage_stats) > 0:
+                    copy_size = min(len(usage_stats), current_stats_size)
+                    self.prompt_usage_stats[:copy_size].copy_(usage_stats[:copy_size].to(device))
+
+            print(f"✓ Updated usage statistics for {current_stats_size} prompts")
+
+        except Exception as e:
+            print(f"Warning: Failed to update usage statistics: {str(e)}")
+            self.prompt_usage_stats = torch.zeros(self.num_prompts, device=device)
 
 
 # 为了兼容性，保留原来的类名

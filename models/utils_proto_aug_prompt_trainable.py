@@ -179,26 +179,13 @@ class ProtoAugManager:
         for batch_idx, (images, label, _, _) in enumerate(tqdm(train_loader, desc="Updating online prototypes")):
             images = images.cuda(non_blocking=True)
             with torch.no_grad():
-                if isinstance(model, PromptEnhancedModel):
-                    # 使用完整模型进行预测（包括prompt增强）
-                    _, logits = model(images)
-                    all_preds_list.append(logits.argmax(1))
-
-                    # 但提取原始backbone特征用于计算prototype
-                    original_prompt_training = model.enable_prompt_training
-                    model.disable_prompt_learning()
-                    try:
-                        feats = model.backbone(images)
-                    finally:
-                        if original_prompt_training:
-                            model.enable_prompt_learning()
-                else:
-                    # 兼容原始Sequential模型
-                    feats, logits = model(images)
-                    all_preds_list.append(logits.argmax(1))
-
+                _, logits = model(images)
+                # 但提取原始backbone特征用于计算prototype
+                model.disable_prompt_learning()
+                feats = model.backbone(images)
                 feats = torch.nn.functional.normalize(feats, dim=-1)
                 all_feats_list.append(feats)
+                all_preds_list.append(logits.argmax(1))
 
         all_feats = torch.cat(all_feats_list, dim=0)
         all_preds = torch.cat(all_preds_list, dim=0)
@@ -209,33 +196,28 @@ class ProtoAugManager:
             feats_c = all_feats[all_preds == c]
             if len(feats_c) == 0:
                 self.logger.info(f'No pred of class {c}, using fc (last_layer) parameters...')
-                if isinstance(model, PromptEnhancedModel):
-                    feats_c_mean = model.projector.last_layer.weight_v.data[c]
-                else:
-                    feats_c_mean = model[1].last_layer.weight_v.data[c]
+                feats_c_mean = model.projector.last_layer.weight_v.data[c]
             else:
                 self.logger.info(f'Computing (predicted) class-wise mean for class {c}...')
                 feats_c_mean = torch.mean(feats_c, dim=0)
             prototypes_list.append(feats_c_mean)
 
-        if prototypes_list:
-            prototypes_cur = torch.stack(prototypes_list, dim=0)
-            prototypes_all = torch.cat([self.prototypes, prototypes_cur], dim=0)
-            prototypes_all = F.normalize(prototypes_all, dim=-1, p=2)
+        prototypes_cur = torch.stack(prototypes_list, dim=0)
+        prototypes_all = torch.cat([self.prototypes, prototypes_cur], dim=0)
+        prototypes_all = F.normalize(prototypes_all, dim=-1, p=2)
 
-            # update
-            self.prototypes = prototypes_all
+         # update
+        self.prototypes = prototypes_all
 
-            # update mean similarity for each prototype
-            similarity = prototypes_all @ prototypes_all.T
-            for i in range(len(similarity)):
-                similarity[i, i] -= similarity[i, i]
-            mean_similarity = torch.sum(similarity, dim=-1) / (len(similarity) - 1)
-            self.mean_similarity = mean_similarity
+        # update mean similarity for each prototype
+        similarity = prototypes_all @ prototypes_all.T
+        for i in range(len(similarity)):
+            similarity[i, i] -= similarity[i, i]
+        mean_similarity = torch.sum(similarity, dim=-1) / (len(similarity) - 1)
+        self.mean_similarity = mean_similarity
 
-            self.logger.info(f"Updated prototypes: {len(prototypes_all)} classes total")
-        else:
-            self.logger.warning("No new prototypes to add")
+        self.logger.info(f"Updated prototypes: {len(prototypes_all)} classes total")
+
 
     def get_prototype_statistics(self):
         """
