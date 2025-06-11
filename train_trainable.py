@@ -879,7 +879,6 @@ if __name__ == "__main__":
                         help='EMA alpha for prompt updates')
     parser.add_argument('--max_prompts', type=int, default=200,
                         help='Maximum number of prompts in the pool')
-
     parser.add_argument('--prompt_pool', action='store_true', default=True,
                         help='Use prompt pool for feature enhancement')
 

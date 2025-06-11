@@ -140,7 +140,7 @@ def visualize_graph_network(adjacency_matrix, save_path, max_nodes=5000, logger=
 
 class LearnablePromptPool(nn.Module):
     def __init__(self, feature_dim, min_community_size=5, similarity_threshold=0.6,
-                 community_ratio=1.4, device='cuda', max_prompts=200, num_heads=4):
+                 community_ratio=1.4, device='cuda', max_prompts=200):
         super(LearnablePromptPool, self).__init__()
 
         self.feature_dim = feature_dim
@@ -155,11 +155,6 @@ class LearnablePromptPool(nn.Module):
         self.prompt_keys = None  # 用于相似度计算和prompt选择
         self.prompt_values = None  # 用于实际的特征增强
 
-        # 多头注意力参数
-        self.num_heads = num_heads
-        self.head_dim = feature_dim // num_heads
-        assert self.head_dim * num_heads == feature_dim, "feature_dim必须能被num_heads整除"
-
         # 统计信息
         self.prompt_usage_stats = None
         self.community_info = []
@@ -169,19 +164,6 @@ class LearnablePromptPool(nn.Module):
         self.usage_efficiency_weight = 0.2  # 使用效率损失权重
         self.key_value_consistency_weight = 0.1  # Key-Value一致性权重
         self.key_feature_similarity_weight = 0.15  # Key-Feature相似度损失权重
-
-        self._initialize_attention_layers()
-
-    def _initialize_attention_layers(self):
-        """初始化注意力层参数"""
-        self.query_proj = nn.Linear(self.feature_dim, self.feature_dim)
-        self.key_proj = nn.Linear(self.feature_dim, self.feature_dim)
-        self.value_proj = nn.Linear(self.feature_dim, self.feature_dim)
-        self.output_proj = nn.Linear(self.feature_dim, self.feature_dim)
-
-        # 层规范化
-        self.norm1 = nn.LayerNorm(self.feature_dim)
-        self.norm2 = nn.LayerNorm(self.feature_dim)
 
     def create_prompt_pool(self, model, data_loader, num_classes, logger):
         """
@@ -439,67 +421,32 @@ class LearnablePromptPool(nn.Module):
         # 计算注意力权重（使用较低的温度增强选择性）
         attention_weights = F.softmax(top_k_values / 0.05, dim=1)
 
-        # 收集top-k prompts
-        # [B, top_k, D]
-        selected_prompt_values = self.prompt_values[top_k_indices]
+        # 获取选中的prompt values用于特征增强
+        selected_prompt_values = self.prompt_values[top_k_indices]  # [B, top_k, D]
 
-        # 步骤2: 基于注意力的token级融合
-        # 第一步：准备query, key, value
-        # 将feature视为query [B, 1, D]
-        features_reshaped = features.unsqueeze(1)
+        # 计算加权的prompt contribution
+        prompt_contribution = torch.sum(
+            attention_weights.unsqueeze(-1) * selected_prompt_values,
+            dim=1
+        )
 
-        # 应用注意力投影
-        queries = self.query_proj(features_reshaped)  # [B, 1, D]
-        keys = self.key_proj(selected_prompt_values)  # [B, top_k, D]
-        values = self.value_proj(selected_prompt_values)  # [B, top_k, D]
+        # 自适应增强策略：基于最高相似度动态调整增强强度
+        max_similarity = top_k_values.max(dim=1)[0]  # [B]
+        enhancement_strength = torch.sigmoid(max_similarity * 3 - 1.5)
 
-        # 多头注意力分割
-        batch_size, seq_len_q, d_model = queries.size()
-        batch_size, seq_len_k, d_model = keys.size()
+        # 使用残差连接进行特征增强
+        enhanced_features = features + enhancement_strength.unsqueeze(-1) * prompt_contribution
+        enhanced_features = F.normalize(enhanced_features, dim=1)
 
-        queries = queries.view(batch_size, seq_len_q, self.num_heads, self.head_dim).transpose(1,
-                                                                                               2)  # [B, heads, 1, head_dim]
-        keys = keys.view(batch_size, seq_len_k, self.num_heads, self.head_dim).transpose(1,
-                                                                                         2)  # [B, heads, top_k, head_dim]
-        values = values.view(batch_size, seq_len_k, self.num_heads, self.head_dim).transpose(1,
-                                                                                             2)  # [B, heads, top_k, head_dim]
-
-        # 计算注意力分数
-        # [B, heads, 1, top_k]
-        scores = torch.matmul(queries, keys.transpose(-2, -1)) / (self.head_dim ** 0.5)
-
-        # 应用softmax获取注意力权重
-        attn_weights = F.softmax(scores, dim=-1)
-
-        # 应用注意力权重到values
-        # [B, heads, 1, head_dim]
-        attn_output = torch.matmul(attn_weights, values)
-
-        # 重塑和连接多个头的输出
-        # [B, 1, D]
-        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len_q, d_model)
-
-        # 应用输出投影
-        attn_output = self.output_proj(attn_output)
-
-        # 第一个残差连接 + 层规范化
-        features_norm1 = self.norm1(features_reshaped + attn_output)
-
-        # 第二个层规范化 (可以在这里添加前馈网络，如果需要)
-        enhanced_features = self.norm2(features_norm1)
-
-        # 重塑回原始维度 [B, D]
-        enhanced_features = enhanced_features.squeeze(1)
-
-        # 记录注意力信息，如果需要
-        attention_info = None
 
         attention_info = {
-                'attention_weights': attn_weights.squeeze(1),  # [B, top_k]
-                'selected_prompt_indices': top_k_indices,
-                'top_k_similarities': top_k_values,
-                'enhanced_features': enhanced_features
+            'attention_weights': attention_weights,
+            'selected_prompt_indices': top_k_indices,
+            'enhancement_strength': enhancement_strength,
+            'max_similarity': max_similarity,
+            'prompt_contribution': prompt_contribution
             }
+
 
         return enhanced_features, attention_info
 
