@@ -5,7 +5,7 @@ from PIL import Image
 from copy import deepcopy
 from torch.utils.data import Dataset
 from torchvision.datasets.folder import default_loader
-from config import clear_10_root
+from config import clear_10_root,clear_100_root
 
 
 def build_class_mapping(root, split='train', domain=1):
@@ -13,8 +13,7 @@ def build_class_mapping(root, split='train', domain=1):
     class_names = sorted([d for d in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, d))])
     return {name: idx for idx, name in enumerate(class_names)}
 
-
-class CustomCLEAR(Dataset):
+class CustomCLEAR10(Dataset):
     def __init__(self, root, split='train', domains=(1,), transform=None, loader=default_loader, class_to_id=None):
         self.root = root
         self.split = split
@@ -66,8 +65,62 @@ class CustomCLEAR(Dataset):
 
         return img, target, self.uq_idxs[idx]
 
+class CustomCLEAR100(Dataset):
+    """CLEAR100数据集类，支持100个类别和多域训练"""
+    def __init__(self, root, split='train', domains=(1,), transform=None, loader=default_loader, class_to_id=None):
+        self.root = root
+        self.split = split
+        self.domains = domains if isinstance(domains, (list, tuple)) else [domains]
+        self.transform = transform
+        self.loader = loader
+        self.class_to_id = class_to_id or build_class_mapping(root, split, self.domains[0])
+
+        self._load_metadata()
+        self.uq_idxs = np.array(range(len(self)))
+        self.target_transform = None
+
+    def _load_metadata(self):
+        """加载所有图像的元数据"""
+        records = []
+        for domain in self.domains:
+            domain_path = os.path.join(self.root, self.split, str(domain))
+            if not os.path.exists(domain_path):
+                continue
+            for class_name in sorted(os.listdir(domain_path)):
+                if class_name not in self.class_to_id:
+                    continue
+                class_id = self.class_to_id[class_name]
+                class_path = os.path.join(domain_path, class_name)
+                if not os.path.isdir(class_path):
+                    continue
+                for fname in os.listdir(class_path):
+                    if fname.lower().endswith(('.jpg', '.jpeg', '.png')):
+                        records.append({
+                            "filepath": os.path.join(class_path, fname),
+                            "target": class_id,
+                            "domain": domain
+                        })
+        self.data = pd.DataFrame(records)
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        sample = self.data.iloc[idx]
+        path = sample.filepath
+        target = sample.target
+        img = self.loader(path)
+
+        if self.transform:
+            img = self.transform(img)
+
+        if self.target_transform:
+            target = self.target_transform(target)
+
+        return img, target, self.uq_idxs[idx]
 
 def subsample_dataset(dataset, idxs):
+    idxs = np.array(idxs, dtype=int)
     mask = np.zeros(len(dataset)).astype('bool')
     mask[idxs] = True
     dataset.data = dataset.data[mask].reset_index(drop=True)
@@ -111,7 +164,7 @@ def subDataset_wholeDataset(datalist):
     return whole
 
 
-def get_clear_datasets(train_transform, test_transform, config_dict,
+def get_clear_10_datasets(train_transform, test_transform, config_dict,
                        train_classes=(0, 1, 2, 3, 4, 5, 6),
                        novel_classes=(7, 8, 9),
                        prop_train_labels=1.0,
@@ -132,11 +185,11 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
     # 1) 构造离线训练/测试集
     # -----------------------------
 
-    train_dataset = CustomCLEAR(root=root, split='train', domains=[1], transform=train_transform,
+    train_dataset = CustomCLEAR10(root=root, split='train', domains=[1], transform=train_transform,
                                 class_to_id=class_to_id)
     offline_train_dataset = subsample_classes(deepcopy(train_dataset), include_classes=train_classes)
 
-    test_dataset = CustomCLEAR(root=root, split='test', domains=[1], transform=test_transform, class_to_id=class_to_id)
+    test_dataset = CustomCLEAR10(root=root, split='test', domains=[1], transform=test_transform, class_to_id=class_to_id)
 
     # 根据balance_test_samples参数决定是否平衡采样测试集
     if balance_test_samples:
@@ -166,9 +219,9 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
 
     for session in range(continual_session_num):
         domain_id = session + 2
-        train_domain_dataset = CustomCLEAR(root=root, split='train', domains=[domain_id], transform=train_transform,
+        train_domain_dataset = CustomCLEAR10(root=root, split='train', domains=[domain_id], transform=train_transform,
                                            class_to_id=class_to_id)
-        test_domain_dataset = CustomCLEAR(root=root, split='test', domains=[domain_id], transform=test_transform,
+        test_domain_dataset = CustomCLEAR10(root=root, split='test', domains=[domain_id], transform=test_transform,
                                           class_to_id=class_to_id)
 
         old_samples = []
@@ -212,7 +265,7 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
                 combined_temp = subDataset_wholeDataset(cumulative_test_datasets)
 
                 # 对合并后的数据集按类别进行平衡采样
-                balanced_combined = CustomCLEAR(root=root, split='test', domains=[1],
+                balanced_combined = CustomCLEAR10(root=root, split='test', domains=[1],
                                                 transform=test_transform, class_to_id=class_to_id)
                 balanced_combined.data = combined_temp.data.copy()
                 balanced_combined.uq_idxs = combined_temp.uq_idxs.copy()
@@ -247,6 +300,138 @@ def get_clear_datasets(train_transform, test_transform, config_dict,
 
     return all_datasets, novel_targets_shuffle
 
+
+def get_clear_100_datasets(train_transform, test_transform, config_dict,
+                           train_classes=range(50),
+                           novel_classes=range(50, 100),
+                           prop_train_labels=1.0,
+                           split_train_val=False,
+                           is_shuffle=False, seed=0,
+                           test_mode='current_session',
+                           root=clear_100_root,
+                           balance_test_samples=True,
+                           samples_per_class=100):
+    continual_session_num = config_dict.get('continual_session_num', 5)  # 改为5个session
+    if seed is not None:
+        np.random.seed(seed)
+
+    class_to_id = build_class_mapping(root, split='train', domain=1)
+
+    # -----------------------------
+    # 1) 构造离线训练/测试集
+    # -----------------------------
+
+    train_dataset = CustomCLEAR100(root=root, split='train', domains=[1], transform=train_transform,
+                                   class_to_id=class_to_id)
+    offline_train_dataset = subsample_classes(deepcopy(train_dataset), include_classes=train_classes)
+
+    test_dataset = CustomCLEAR100(root=root, split='test', domains=[1], transform=test_transform,
+                                  class_to_id=class_to_id)
+
+    if balance_test_samples:
+        offline_test_dataset = subsample_classes_balanced(deepcopy(test_dataset), include_classes=train_classes,
+                                                          samples_per_class=samples_per_class)
+    else:
+        offline_test_dataset = subsample_classes(deepcopy(test_dataset), include_classes=train_classes)
+
+    # -----------------------------
+    # 2) 确定各 session 的新类 - 修正版本
+    # -----------------------------
+
+    novel_classes_list = list(novel_classes)  # [50, 51, 52, ..., 99]
+
+    # 5个session，每个session引入10个新类别，累积模式
+    session_novel_class_map = {
+        0: novel_classes_list[0:10],  # [50, 51, 52, 53, 54, 55, 56, 57, 58, 59]
+        1: novel_classes_list[0:20],  # [50, 51, ..., 69]
+        2: novel_classes_list[0:30],  # [50, 51, ..., 79]
+        3: novel_classes_list[0:40],  # [50, 51, ..., 89]
+        4: novel_classes_list  # [50, 51, ..., 99]
+    }
+
+    online_old_dataset_unlabelled_list = []
+    online_novel_dataset_unlabelled_list = []
+    online_test_dataset_list = []
+    cumulative_test_datasets = [offline_test_dataset]
+
+    # -----------------------------
+    # 3) 构造每个 session 的数据集
+    # -----------------------------
+
+    for session in range(continual_session_num):
+        domain_id = session + 2
+        train_domain_dataset = CustomCLEAR100(root=root, split='train', domains=[domain_id], transform=train_transform,
+                                              class_to_id=class_to_id)
+        test_domain_dataset = CustomCLEAR100(root=root, split='test', domains=[domain_id], transform=test_transform,
+                                             class_to_id=class_to_id)
+# ====================
+        old_samples = []
+        for cls in train_classes:
+            cls_subset = subsample_classes(deepcopy(train_domain_dataset), include_classes=[cls])
+            cls_idxs = list(range(len(cls_subset.data)))
+            sample_count = config_dict['online_old_seen_num']
+            selected = np.random.choice(cls_idxs, min(sample_count, len(cls_idxs)), replace=False)
+            old_samples.append(subsample_dataset(cls_subset, selected))
+        session_old_dataset = subDataset_wholeDataset(old_samples)
+
+        novel_samples = []
+        for novel_cls in session_novel_class_map[session]:
+            novel_subset = subsample_classes(deepcopy(train_domain_dataset), include_classes=[novel_cls])
+            sample_count = config_dict['online_novel_unseen_num'] if novel_cls == novel_classes[session] else \
+                config_dict['online_novel_seen_num']
+            cls_idxs = list(range(len(novel_subset.data)))
+            selected = np.random.choice(cls_idxs, min(sample_count, len(cls_idxs)), replace=False)
+            novel_samples.append(subsample_dataset(novel_subset, selected))
+        session_novel_dataset = subDataset_wholeDataset(novel_samples)
+
+        online_old_dataset_unlabelled_list.append(session_old_dataset)
+        online_novel_dataset_unlabelled_list.append(session_novel_dataset)
+
+        test_classes = list(train_classes) + session_novel_class_map[session]
+
+        # 对测试集应用平衡采样
+        if balance_test_samples:
+            session_test_dataset = subsample_classes_balanced(deepcopy(test_domain_dataset),
+                                                              include_classes=test_classes,
+                                                              samples_per_class=samples_per_class)
+        else:
+            session_test_dataset = subsample_classes(deepcopy(test_domain_dataset), include_classes=test_classes)
+
+        if test_mode == 'cumulative_session':
+            cumulative_test_datasets.append(session_test_dataset)
+
+            if balance_test_samples:
+                combined_temp = subDataset_wholeDataset(cumulative_test_datasets)
+                balanced_combined = CustomCLEAR100(root=root, split='test', domains=[1],
+                                                   transform=test_transform, class_to_id=class_to_id)
+                balanced_combined.data = combined_temp.data.copy()
+                balanced_combined.uq_idxs = combined_temp.uq_idxs.copy()
+
+                all_classes = list(train_classes) + session_novel_class_map[session]
+                balanced_combined = subsample_classes_balanced(balanced_combined,
+                                                               include_classes=all_classes,
+                                                               samples_per_class=samples_per_class)
+                online_test_dataset_list.append(balanced_combined)
+            else:
+                combined = subDataset_wholeDataset(cumulative_test_datasets)
+                online_test_dataset_list.append(combined)
+        else:
+            online_test_dataset_list.append(session_test_dataset)
+
+    all_datasets = {
+        'offline_train_dataset': offline_train_dataset,
+        'offline_test_dataset': offline_test_dataset,
+        'online_old_dataset_unlabelled_list': online_old_dataset_unlabelled_list,
+        'online_novel_dataset_unlabelled_list': online_novel_dataset_unlabelled_list,
+        'online_test_dataset_list': online_test_dataset_list,
+    }
+
+    novel_targets_shuffle = list(novel_classes)
+    if is_shuffle:
+        np.random.shuffle(novel_targets_shuffle)
+
+    return all_datasets, novel_targets_shuffle
+
 # Example usage
 
 if __name__ == '__main__':
@@ -261,7 +446,7 @@ if __name__ == '__main__':
         'online_novel_seen_num': 50,
     }
 
-    all_datasets, novel_targets_shuffle = get_clear_datasets(
+    all_datasets, novel_targets_shuffle = get_clear_10_datasets(
         train_transform=dummy_transform,
         test_transform=dummy_transform,
         config_dict=config_dict,

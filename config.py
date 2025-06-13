@@ -4,6 +4,7 @@
 cifar_10_root = '/home/ps/_jinwei/Dataset/CIFAR/cifar10'
 clear_10_root = '/home/ps/_jinwei/Dataset/CLEAR/CLEAR10_CGCD'
 cifar_100_root = '/home/ps/_jinwei/Dataset/CIFAR/cifar100'
+clear_100_root = '/home/ps/_jinwei/Dataset/CLEAR/CLEAR100_CGCD'
 tiny_imagenet_root = '/home/ps/_jinwei/Dataset/TinyImageNet/'
 cub_root = '/home/ps/_jinwei/Dataset/CUB'
 aircraft_root = '/home/ps/_jinwei/Dataset/Aircraft/fgvc-aircraft-2013b/'

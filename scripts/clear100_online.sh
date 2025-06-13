@@ -23,7 +23,7 @@ CUDA_VISIBLE_DEVICES=0 python train_happy.py \
     --radius_scale 1.0 \
     --hardness_temp 0.1 \
     --eval_funcs 'v2' \
-    --num_old_classes 7 \
+    --num_old_classes 50 \
     --prop_train_labels 1.0 \
     --train_session online \
     --epochs_online_per_session 30 \

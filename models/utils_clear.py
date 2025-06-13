@@ -3,8 +3,11 @@ import shutil
 from pathlib import Path
 
 # 定义源路径和目标路径 - 请根据你的实际路径修改
-source_root = "~/_jinwei/Dataset/CLEAR/CLEAR10/train/labeled_images"
-target_root = "~/jinwei/Dataset/CLEAR/CLEAR10_restructured/train"
+source_root = "/home/ps/_jinwei/Dataset/CLEAR/CLEAR100/train_image_only/labeled_images"
+target_root = "/home/ps/_jinwei/Dataset/CLEAR/CLEAR100_CGCD/train"
+
+# source_root = "/home/ps/_jinwei/Dataset/CLEAR/CLEAR100/test/labeled_images"
+# target_root = "/home/ps/_jinwei/Dataset/CLEAR/CLEAR100_CGCD/test"
 
 # 定义映射关系：源文件夹 -> 目标文件夹
 folder_mapping = {
