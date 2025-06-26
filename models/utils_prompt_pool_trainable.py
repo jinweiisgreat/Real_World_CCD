@@ -14,6 +14,10 @@ Author: Wei Jin
 update: Prompt Training
 Date: 2025/06/03
 Author: Wei Jin
+
+update: 添加 attention fusion
+Data: 2025/06/10
+Author: Wei Jin
 """
 import torch
 import torch.nn as nn
@@ -164,11 +168,12 @@ class LearnablePromptPool(nn.Module):
         self.prompt_usage_stats = None
         self.community_info = []
 
-        # 训练相关权重
+        # 训练相关权重 - 包含新的跨视图一致性权重
         self.task_alignment_weight = 0.8  # 任务对齐损失权重
         self.usage_efficiency_weight = 0.2  # 使用效率损失权重
         self.key_value_consistency_weight = 0.1  # Key-Value一致性权重
         self.key_feature_similarity_weight = 0.15  # Key-Feature相似度损失权重
+        self.cross_view_consistency_weight = 0.1  # 跨视图一致性损失权重（新增）
 
         self._initialize_attention_layers()
 
@@ -388,157 +393,158 @@ class LearnablePromptPool(nn.Module):
 
     def forward(self, features, top_k=5, return_attention=False):
         """
-        Forward pass for learnable prompt pool
+        Forward pass for learnable prompt pool with dual-view support
 
         Args:
-            features: Input features [B, D]
+            features: Input features [B*n_views, D]
             top_k: Number of top prompts to use
             return_attention: Whether to return attention weights
 
         Returns:
-            enhanced_features: Enhanced features [B, D]
-            attention_info: (optional) Attention weights [B, top_k]
+            enhanced_features: Enhanced features [B*n_views, D]
+            attention_info: (optional) Attention weights and related info
         """
         if self.prompt_keys is None or self.num_prompts == 0:
             if return_attention:
                 return features, None
             return features
 
-        batch_size = features.shape[0]
+        batch_size_total = features.shape[0]
 
         # 计算特征与prompt keys的相似度
         features_norm = F.normalize(features, dim=1)
         keys_norm = F.normalize(self.prompt_keys, dim=1)
 
-        # 相似度矩阵 [B, num_prompts]
+        # 相似度矩阵 [B*n_views, num_prompts]
         similarity = features_norm @ keys_norm.T
 
         # 选择top-k个最相似的prompts
         top_k = min(top_k, self.num_prompts)
         top_k_values, top_k_indices = torch.topk(similarity, top_k, dim=1)
 
-        # 统计使用情况 - 修复的代码部分
+        # 统计使用情况
         if hasattr(self, 'prompt_usage_stats'):
-            # 确保usage_stats是在正确的设备上
             if self.prompt_usage_stats.device != features.device:
                 self.prompt_usage_stats = self.prompt_usage_stats.to(features.device)
 
             # 创建一个用于计数的临时张量
-            batch_usage = torch.zeros(self.num_prompts,
-                                      device=features.device,
-                                      dtype=torch.float)
+            batch_usage = torch.zeros(self.num_prompts, device=features.device, dtype=torch.float)
 
             # 在每个batch中计数每个prompt的使用次数
             for indices in top_k_indices:
                 for idx in indices:
                     batch_usage[idx] += 1
 
-            # 更新总体使用统计 - 使用带有梯度的累加操作
+            # 更新总体使用统计
             self.prompt_usage_stats = self.prompt_usage_stats + batch_usage
 
         # 计算注意力权重（使用较低的温度增强选择性）
         attention_weights = F.softmax(top_k_values / 0.05, dim=1)
 
         # 收集top-k prompts
-        # [B, top_k, D]
-        selected_prompt_values = self.prompt_values[top_k_indices]
+        selected_prompt_values = self.prompt_values[top_k_indices]  # [B*n_views, top_k, D]
 
-        # 步骤2: 基于注意力的token级融合
-        # 第一步：准备query, key, value
-        # 将feature视为query [B, 1, D]
-        features_reshaped = features.unsqueeze(1)
+        # 基于注意力的token级融合
+        features_reshaped = features.unsqueeze(1)  # [B*n_views, 1, D]
 
         # 应用注意力投影
-        queries = self.query_proj(features_reshaped)  # [B, 1, D]
-        keys = self.key_proj(selected_prompt_values)  # [B, top_k, D]
-        values = self.value_proj(selected_prompt_values)  # [B, top_k, D]
+        queries = self.query_proj(features_reshaped)  # [B*n_views, 1, D]
+        keys = self.key_proj(selected_prompt_values)  # [B*n_views, top_k, D]
+        values = self.value_proj(selected_prompt_values)  # [B*n_views, top_k, D]
 
         # 多头注意力分割
         batch_size, seq_len_q, d_model = queries.size()
         batch_size, seq_len_k, d_model = keys.size()
 
-        queries = queries.view(batch_size, seq_len_q, self.num_heads, self.head_dim).transpose(1,
-                                                                                               2)  # [B, heads, 1, head_dim]
-        keys = keys.view(batch_size, seq_len_k, self.num_heads, self.head_dim).transpose(1,
-                                                                                         2)  # [B, heads, top_k, head_dim]
-        values = values.view(batch_size, seq_len_k, self.num_heads, self.head_dim).transpose(1,
-                                                                                             2)  # [B, heads, top_k, head_dim]
+        queries = queries.view(batch_size, seq_len_q, self.num_heads, self.head_dim).transpose(1, 2)
+        keys = keys.view(batch_size, seq_len_k, self.num_heads, self.head_dim).transpose(1, 2)
+        values = values.view(batch_size, seq_len_k, self.num_heads, self.head_dim).transpose(1, 2)
 
         # 计算注意力分数
-        # [B, heads, 1, top_k]
         scores = torch.matmul(queries, keys.transpose(-2, -1)) / (self.head_dim ** 0.5)
 
         # 应用softmax获取注意力权重
         attn_weights = F.softmax(scores, dim=-1)
 
         # 应用注意力权重到values
-        # [B, heads, 1, head_dim]
         attn_output = torch.matmul(attn_weights, values)
 
         # 重塑和连接多个头的输出
-        # [B, 1, D]
         attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len_q, d_model)
 
         # 应用输出投影
         attn_output = self.output_proj(attn_output)
 
-        # 第一个残差连接 + 层规范化
+        # 残差连接 + 层规范化
         features_norm1 = self.norm1(features_reshaped + attn_output)
-
-        # 第二个层规范化 (可以在这里添加前馈网络，如果需要)
         enhanced_features = self.norm2(features_norm1)
 
-        # 重塑回原始维度 [B, D]
-        enhanced_features = enhanced_features.squeeze(1)
+        # 重塑回原始维度
+        enhanced_features = enhanced_features.squeeze(1)  # [B*n_views, D]
 
-        # 记录注意力信息，如果需要
+        # 记录详细的注意力信息
         attention_info = None
-
-        attention_info = {
-                'attention_weights': attn_weights.squeeze(1),  # [B, top_k]
-                'selected_prompt_indices': top_k_indices,
-                'top_k_similarities': top_k_values,
-                'enhanced_features': enhanced_features
+        if return_attention:
+            attention_info = {
+                'attention_weights': attention_weights,  # [B*n_views, top_k]
+                'selected_prompt_indices': top_k_indices,  # [B*n_views, top_k]
+                'top_k_similarities': top_k_values,  # [B*n_views, top_k]
+                'enhanced_features': enhanced_features,
+                'features_norm': features_norm,  # 保存归一化的特征
+                'multi_head_attention': attn_weights.mean(dim=1).squeeze(1),  # [B*n_views, top_k]
             }
 
         return enhanced_features, attention_info
 
     def compute_prompt_losses(self, features, enhanced_features, attention_info, targets=None, logits=None):
         """
-        计算prompt相关的训练损失
+        计算prompt相关的训练损失，支持双视图self-distillation
+
+        Args:
+            features: 原始特征 [2*B, D] (两个视图拼接)
+            enhanced_features: 增强后的特征 [2*B, D]
+            attention_info: 注意力信息
+            targets: 目标标签 [B] (单视图的标签)
+            logits: 分类logits [2*B, num_classes]
+
+        Returns:
+            losses: 包含各项损失的字典
         """
         losses = {}
         device = features.device
 
         if self.prompt_keys is None or self.num_prompts == 0:
             return {k: torch.tensor(0.0, device=device) for k in
-                    ['task_alignment', 'usage_efficiency', 'key_value_consistency', 'total']}
+                    ['task_alignment', 'usage_efficiency', 'key_value_consistency',
+                     'key_feature_similarity', 'cross_view_consistency', 'total']}
+
+        # 计算视图数量和batch size
+        total_samples = features.size(0)
+        batch_size = targets.size(0) if targets is not None else total_samples // 2
+        n_views = total_samples // batch_size
 
         # 1. 任务对齐损失：确保prompt增强真正有助于分类任务
         task_alignment_loss = torch.tensor(0.0, device=device)
 
         if logits is not None and targets is not None:
-            # 处理尺寸不匹配的问题
-            batch_size = targets.size(0)
-            n_views = logits.size(0) // batch_size  # 计算视图数量
+            # 将logits按视图分割
+            view_logits = logits.chunk(n_views)
 
-            if n_views > 1:
-                # 如果有多个视图，重新整形logits并只使用第一个视图进行评估
-                reshaped_logits = logits.view(n_views, batch_size, -1)
-                first_view_logits = reshaped_logits[0]  # 取第一个视图
+            task_alignment_losses = []
+            for v_idx, view_logit in enumerate(view_logits):
+                enhanced_predictions = F.softmax(view_logit, dim=1)
+                predicted_classes = view_logit.argmax(dim=1)
 
-                enhanced_predictions = F.softmax(first_view_logits, dim=1)
-                predicted_classes = first_view_logits.argmax(dim=1)
-            else:
-                enhanced_predictions = F.softmax(logits, dim=1)
-                predicted_classes = logits.argmax(dim=1)
+                # 对于预测正确的样本，我们希望增强后的置信度更高
+                correct_mask = (predicted_classes == targets)
+                if correct_mask.any():
+                    correct_confidences = enhanced_predictions[correct_mask, targets[correct_mask]]
+                    # 使用负对数似然鼓励高置信度
+                    view_loss = -torch.log(correct_confidences + 1e-8).mean()
+                    task_alignment_losses.append(view_loss)
 
-            # 对于预测正确的样本，我们希望增强后的置信度更高
-            correct_mask = (predicted_classes == targets)
-            if correct_mask.any():
-                correct_confidences = enhanced_predictions[correct_mask, targets[correct_mask]]
-                # 使用负对数似然鼓励高置信度
-                task_alignment_loss = -torch.log(correct_confidences + 1e-8).mean()
+            if task_alignment_losses:
+                task_alignment_loss = torch.stack(task_alignment_losses).mean()
         else:
             # 备用方案：确保增强后的特征与原始特征保持合理的相关性
             feature_similarity = F.cosine_similarity(features, enhanced_features, dim=1)
@@ -550,14 +556,22 @@ class LearnablePromptPool(nn.Module):
         usage_efficiency_loss = torch.tensor(0.0, device=device)
 
         if attention_info is not None and 'attention_weights' in attention_info:
-            attention_weights = attention_info['attention_weights']  # [B, top_k]
+            attention_weights = attention_info['attention_weights']  # [2*B, top_k]
 
-            # 计算注意力熵，避免过度集中或过度分散
-            attention_entropy = -torch.sum(attention_weights * torch.log(attention_weights + 1e-8), dim=1)
-            # 目标熵：略低于uniform分布的熵，鼓励适度的专门化
-            target_entropy = np.log(attention_weights.shape[1]) * 0.7
-            usage_efficiency_loss = F.mse_loss(attention_entropy,
-                                               torch.full_like(attention_entropy, target_entropy))
+            # 计算每个视图的注意力熵
+            view_attention_weights = attention_weights.chunk(n_views)
+            usage_efficiency_losses = []
+
+            for view_weights in view_attention_weights:
+                # 计算注意力熵，避免过度集中或过度分散
+                attention_entropy = -torch.sum(view_weights * torch.log(view_weights + 1e-8), dim=1)
+                # 目标熵：略低于uniform分布的熵，鼓励适度的专门化
+                target_entropy = np.log(view_weights.shape[1]) * 0.7
+                view_loss = F.mse_loss(attention_entropy,
+                                       torch.full_like(attention_entropy, target_entropy))
+                usage_efficiency_losses.append(view_loss)
+
+            usage_efficiency_loss = torch.stack(usage_efficiency_losses).mean()
 
         # 3. Key-Value一致性损失：防止Key和Value过度分化
         key_value_consistency_loss = torch.tensor(0.0, device=device)
@@ -573,43 +587,94 @@ class LearnablePromptPool(nn.Module):
             key_value_consistency_loss = F.mse_loss(key_value_similarity,
                                                     torch.full_like(key_value_similarity, target_similarity))
 
-        # 4. 新增：Key-Feature相似度损失 - 拉近选中的prompt keys与对应特征的距离
+        # 4. Key-Feature相似度损失 - 支持双视图
         key_feature_similarity_loss = torch.tensor(0.0, device=device)
 
-        if attention_info is not None and 'selected_prompt_keys' in attention_info and 'features_norm' in attention_info:
-            selected_prompt_keys = attention_info['selected_prompt_keys']  # [B, top_k, D]
-            features_norm = attention_info['features_norm']  # [B, D]
-            attention_weights = attention_info['attention_weights']  # [B, top_k]
+        if attention_info is not None and 'selected_prompt_indices' in attention_info:
+            # 获取选中的prompt indices
+            selected_indices = attention_info['selected_prompt_indices']  # [2*B, top_k]
+            attention_weights = attention_info['attention_weights']  # [2*B, top_k]
 
-            # 计算每个特征与其选中的prompt keys之间的余弦相似度
-            features_expanded = features_norm.unsqueeze(1)  # [B, 1, D]
-            cosine_similarities = F.cosine_similarity(features_expanded, selected_prompt_keys, dim=2)  # [B, top_k]
+            # 归一化features
+            features_norm = F.normalize(features, dim=1)
 
-            # 使用注意力权重对相似度进行加权，重点关注最相关的prompt keys
-            weighted_similarities = cosine_similarities * attention_weights  # [B, top_k]
+            # 为每个视图计算相似度损失
+            view_features = features_norm.chunk(n_views)
+            view_indices = selected_indices.chunk(n_views)
+            view_weights = attention_weights.chunk(n_views)
 
-            # 计算加权平均相似度
-            avg_weighted_similarity = weighted_similarities.sum(dim=1) / (attention_weights.sum(dim=1) + 1e-8)  # [B]
+            key_feature_losses = []
 
-            # 我们希望最大化相似度，所以使用 1 - similarity 作为损失
-            # 也可以使用负相似度或者其他形式
-            key_feature_similarity_loss = (1.0 - avg_weighted_similarity).mean()
+            for v_features, v_indices, v_weights in zip(view_features, view_indices, view_weights):
+                # 获取该视图选中的prompt keys
+                selected_prompt_keys = self.prompt_keys[v_indices]  # [B, top_k, D]
+                selected_prompt_keys = F.normalize(selected_prompt_keys, dim=2)
 
-            # 可选：添加额外的约束，鼓励最相似的prompt key与特征有更高的相似度
-            # 取每个样本最相似的prompt key
-            max_similarities = cosine_similarities.max(dim=1)[0]  # [B]
-            # 鼓励最大相似度接近1
-            max_similarity_loss = (1.0 - max_similarities).mean()
+                # 计算余弦相似度
+                v_features_expanded = v_features.unsqueeze(1)  # [B, 1, D]
+                cosine_similarities = F.cosine_similarity(v_features_expanded, selected_prompt_keys,
+                                                          dim=2)  # [B, top_k]
 
-            # 将两个损失组合
-            key_feature_similarity_loss = 0.7 * key_feature_similarity_loss + 0.3 * max_similarity_loss
+                # 使用注意力权重加权
+                weighted_similarities = cosine_similarities * v_weights
+                avg_weighted_similarity = weighted_similarities.sum(dim=1) / (v_weights.sum(dim=1) + 1e-8)
+
+                # 损失：鼓励高相似度
+                view_loss = (1.0 - avg_weighted_similarity).mean()
+
+                # 额外约束：最相似的prompt应该有更高的相似度
+                max_similarities = cosine_similarities.max(dim=1)[0]
+                max_similarity_loss = (1.0 - max_similarities).mean()
+
+                combined_view_loss = 0.7 * view_loss + 0.3 * max_similarity_loss
+                key_feature_losses.append(combined_view_loss)
+
+            key_feature_similarity_loss = torch.stack(key_feature_losses).mean()
+
+        # 5. 新增：跨视图一致性损失 - 确保两个视图使用相似的prompt策略
+        cross_view_consistency_loss = torch.tensor(0.0, device=device)
+
+        if n_views == 2 and attention_info is not None and 'attention_weights' in attention_info:
+            # 分割两个视图的注意力权重
+            weights_view1, weights_view2 = attention_weights.chunk(2)
+            indices_view1, indices_view2 = attention_info['selected_prompt_indices'].chunk(2)
+
+            # 计算两个视图的prompt使用分布
+            prompt_dist_v1 = torch.zeros(batch_size, self.num_prompts, device=device)
+            prompt_dist_v2 = torch.zeros(batch_size, self.num_prompts, device=device)
+
+            # 填充分布
+            for b in range(batch_size):
+                for k in range(indices_view1.shape[1]):
+                    prompt_dist_v1[b, indices_view1[b, k]] += weights_view1[b, k]
+                    prompt_dist_v2[b, indices_view2[b, k]] += weights_view2[b, k]
+
+            # 计算KL散度或JS散度来衡量分布差异
+            # 使用JS散度更对称
+            m = 0.5 * (prompt_dist_v1 + prompt_dist_v2)
+            kl_v1_m = F.kl_div(torch.log(m + 1e-8), prompt_dist_v1, reduction='none').sum(dim=1)
+            kl_v2_m = F.kl_div(torch.log(m + 1e-8), prompt_dist_v2, reduction='none').sum(dim=1)
+            js_divergence = 0.5 * (kl_v1_m + kl_v2_m)
+
+            cross_view_consistency_loss = js_divergence.mean()
+
+            # 可选：也可以直接比较attention weights的相似度
+            # attention_similarity = F.cosine_similarity(weights_view1, weights_view2, dim=1)
+            # cross_view_consistency_loss += (1.0 - attention_similarity).mean() * 0.5
 
         # 组合所有损失
         losses['task_alignment'] = self.task_alignment_weight * task_alignment_loss
         losses['usage_efficiency'] = self.usage_efficiency_weight * usage_efficiency_loss
         losses['key_value_consistency'] = self.key_value_consistency_weight * key_value_consistency_loss
         losses['key_feature_similarity'] = self.key_feature_similarity_weight * key_feature_similarity_loss
-        losses['total'] = losses['task_alignment'] + losses['usage_efficiency'] + losses['key_value_consistency'] + losses['key_feature_similarity']
+        losses['cross_view_consistency'] = getattr(self, 'cross_view_consistency_weight',
+                                                   0.1) * cross_view_consistency_loss
+
+        losses['total'] = (losses['task_alignment'] +
+                           losses['usage_efficiency'] +
+                           losses['key_value_consistency'] +
+                           losses['key_feature_similarity'] +
+                           losses['cross_view_consistency'])
 
         return losses
 
@@ -640,15 +705,24 @@ class LearnablePromptPool(nn.Module):
                 try:
                     if len(batch) >= 3:
                         if isinstance(batch[0], list):
-                            images = batch[0][0].to(self.device)
+                            # 提取所有视图
+                            views_features = []
+                            for view_idx in range(len(batch[0])):
+                                view_images = batch[0][view_idx].to(self.device)
+                                view_features = model.backbone(view_images)
+                                view_features = F.normalize(view_features, dim=1)
+                                views_features.append(view_features)
+
+                            # 对各视图特征进行平均融合
+                            fused_features = torch.stack(views_features).mean(dim=0)
+                            all_features.append(fused_features.cpu())
                         else:
                             images = batch[0].to(self.device)
+                            features = model.backbone(images)
+                            features = F.normalize(features, dim=1)
+                            all_features.append(features.cpu())
                     else:
                         continue
-
-                    features = model.backbone(images)
-                    features = F.normalize(features, dim=1)
-                    all_features.append(features.cpu())
 
                 except Exception as e:
                     if logger:

@@ -83,9 +83,10 @@ class ProtoAugManager:
         # 从分布中采样
         # prototypes_augmented 包含了 batch_size 个样本
         prototypes_augmented = prototypes_sampled + torch.randn((self.batch_size, self.feature_dim), device=self.device) * self.radius * self.radius_scale
-        #prototypes_augmented = F.normalize(prototypes_augmented, dim=-1, p=2) # NOTE!!! DO NOT normalize
+        # prototypes_augmented = F.normalize(prototypes_augmented, dim=-1, p=2) # NOTE!!! DO NOT normalize
         # forward prototypes and get logits
         _, prototypes_output = model[1](prototypes_augmented)
+        # 这种机制确保了即使在特征空间中偏离中心点，模型仍能保持类别决策边界的稳定性
         proto_aug_loss = nn.CrossEntropyLoss()(prototypes_output / 0.1, prototypes_labels)
 
         return proto_aug_loss

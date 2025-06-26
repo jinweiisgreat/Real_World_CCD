@@ -15,7 +15,7 @@ from project_utils.general_utils import set_seed, init_experiment, AverageMeter
 from project_utils.cluster_and_log_utils import log_accs_from_preds
 
 from data.augmentations import get_transform
-from data.get_datasets_clear import get_class_splits, ContrastiveLearningViewGenerator, get_datasets
+from data.get_datasets import get_class_splits, ContrastiveLearningViewGenerator, get_datasets
 
 from models.utils_simgcd import DINOHead, get_params_groups, SupConLoss, info_nce_logits, DistillLoss
 from models.utils_simgcd_pro import get_kmeans_centroid_for_new_head
