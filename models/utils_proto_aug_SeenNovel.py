@@ -15,7 +15,7 @@ import numpy as np
 from tqdm import tqdm
 from models.prompt_enhanced_model import PromptEnhancedModel
 from models.utils_seen_novel_contrastive import SeenNovelContrastiveLearning
-from scipy.optimize import linear_sum_assignment
+from scipy.optimize import linear_sum_assignment as linear_assignment
 
 
 
@@ -36,8 +36,11 @@ class ProtoAugManager:
         self.mean_similarity = None
 
         # 匈牙利匹配参数
-        self.alignment_threshold = 0.7
-        self.seen_novel_threshold = 0.6
+        # self.alignment_threshold = 0.7
+        # self.seen_novel_threshold = 0.6
+
+        self.num_old_classes = 50  # 新增：固定为50个old类
+        self.alignment_threshold = 0.5
 
         # 新增：Seen Novel对比学习模块
         self.seen_novel_cl = SeenNovelContrastiveLearning(
@@ -131,6 +134,7 @@ class ProtoAugManager:
             if hasattr(model, 'enable_prompt_learning') and original_prompt_training:
                 model.enable_prompt_learning()
 
+    '''
     def prototype_distillation_with_hungarian(self, model_cur, num_old_classes, data_loader):
         """
         步骤1: 基于匈牙利匹配的原型析出
@@ -179,6 +183,61 @@ class ProtoAugManager:
             self.logger.info("✗ 未发现seen novel原型")
 
         return seen_novel_prototypes, distillation_info
+    '''
+
+    def prototype_distillation_with_hungarian(self, model_cur, data_loader):
+        """
+        简化的原型析出：匈牙利匹配识别50个old类，剩余全部为Seen Novel
+
+        Returns:
+            seen_novel_prototypes: 析出的seen novel原型
+            distillation_info: 析出信息
+        """
+        self.logger.info("=== 开始简化的原型析出：识别50个old类，剩余全部为Seen Novel ===")
+
+        if self.prototypes is None:
+            self.logger.warning("No existing prototypes for distillation")
+            return None, {}
+
+        # 计算当前session的原型
+        cur_prototypes, cur_labels = self._compute_current_prototypes(model_cur, data_loader)
+
+        if len(cur_prototypes) == 0:
+            self.logger.warning("No prototypes computed from current data")
+            return None, {}
+
+        # 简化的匈牙利匹配：只对前50个old classes进行对齐
+        old_alignment_map, alignment_quality = self._hungarian_align_old_classes(
+            cur_prototypes, cur_labels
+        )
+
+        # 简化的seen novel析出：剩余的全部作为seen novel
+        seen_novel_prototypes, seen_novel_labels = self._extract_all_remaining_as_seen_novel(
+            cur_prototypes, cur_labels, old_alignment_map
+        )
+
+        # 存储当前session的seen novel信息
+        self.current_seen_novel_prototypes = seen_novel_prototypes
+        self.current_seen_novel_labels = seen_novel_labels
+
+        distillation_info = {
+            'simplified_hungarian_alignment_map': old_alignment_map,
+            'alignment_quality': alignment_quality,
+            'seen_novel_count': len(seen_novel_prototypes) if seen_novel_prototypes is not None else 0,
+            'total_cur_prototypes': len(cur_prototypes),
+            'old_classes_aligned': len([info for info in old_alignment_map.values() if info['is_valid']]),
+        }
+
+        if seen_novel_prototypes is not None:
+            self.logger.info(f"✓ 识别了 {len([info for info in old_alignment_map.values() if info['is_valid']])} 个old类")
+            self.logger.info(f"✓ 析出 {len(seen_novel_prototypes)} 个seen novel原型")
+        else:
+            self.logger.info("✗ 未发现seen novel原型")
+
+        return seen_novel_prototypes, distillation_info
+
+
+
 
     def _compute_current_prototypes(self, model, data_loader):
         """计算当前session的原型"""
@@ -194,9 +253,16 @@ class ProtoAugManager:
             all_confidences = []
 
             with torch.no_grad():
-                for batch in tqdm(data_loader, desc="Computing current prototypes"):
-                    images, _, _, _ = batch
-                    images = images.to(self.device)
+                for batch_idx, batch in enumerate(tqdm(data_loader, desc="Computing current prototypes")):
+
+                    if len(batch) >= 3:
+                        if isinstance(batch[0], list):
+                            images = batch[0][0].to(self.device)
+                        else:
+                            images = batch[0].to(self.device)
+                    else:
+                        continue
+
 
                     features = model.backbone(images)
                     features = F.normalize(features, dim=1)
@@ -240,6 +306,7 @@ class ProtoAugManager:
             if hasattr(model, 'enable_prompt_learning') and original_prompt_training:
                 model.enable_prompt_learning()
 
+    '''
     def _hungarian_align_old_classes(self, cur_prototypes, cur_labels, num_old_classes):
         """匈牙利算法对齐old classes"""
         if len(self.prototypes) < num_old_classes:
@@ -249,8 +316,8 @@ class ProtoAugManager:
         pre_old_prototypes = self.prototypes[:num_old_classes]
 
         # 计算相似度矩阵
-        pre_norm = F.normalize(pre_old_prototypes, dim=1)
-        cur_norm = F.normalize(cur_prototypes, dim=1)
+        pre_norm = F.normalize(pre_old_prototypes, dim=1).to(self.device)
+        cur_norm = F.normalize(cur_prototypes, dim=1).to(self.device)
         similarity_matrix = torch.mm(pre_norm, cur_norm.T)
 
         # 匈牙利匹配
@@ -294,6 +361,81 @@ class ProtoAugManager:
             f"匈牙利对齐结果: {valid_matches}/{len(pre_indices)} 有效匹配, 质量分数: {alignment_quality:.3f}")
 
         return alignment_map, alignment_quality
+        '''
+
+    def _hungarian_align_old_classes(self, cur_prototypes, cur_labels):
+        """
+        简化的匈牙利算法：只对前50个old classes进行对齐
+        """
+        if len(self.prototypes) < self.num_old_classes:
+            self.logger.warning(
+                f"Existing prototypes ({len(self.prototypes)}) < num_old_classes ({self.num_old_classes})")
+            return {}, 0.0
+
+        # 只使用前50个old prototypes
+        pre_old_prototypes = self.prototypes[:self.num_old_classes]
+
+        # 计算相似度矩阵
+        pre_norm = F.normalize(pre_old_prototypes, dim=1).to(self.device)
+        cur_norm = F.normalize(cur_prototypes, dim=1).to(self.device)
+        similarity_matrix = torch.mm(pre_norm, cur_norm.T)
+
+        # 匈牙利匹配
+        cost_matrix = (1.0 - similarity_matrix).cpu().numpy()
+
+        # 确保cost_matrix的维度正确
+        num_pre_old = pre_old_prototypes.shape[0]
+        num_cur = cur_prototypes.shape[0]
+
+        if num_cur < num_pre_old:
+            # 如果当前原型数量少于old类数量，扩展cost_matrix
+            extended_cost_matrix = np.ones((num_pre_old, num_pre_old)) * 2.0  # 大于最大可能的cost
+            extended_cost_matrix[:num_pre_old, :num_cur] = cost_matrix
+            cost_matrix = extended_cost_matrix
+            pre_indices, cur_indices = linear_assignment(cost_matrix)
+            # 只保留有效的匹配
+            valid_mask = cur_indices < num_cur
+            pre_indices = pre_indices[valid_mask]
+            cur_indices = cur_indices[valid_mask]
+        else:
+            pre_indices, cur_indices = linear_assignment(cost_matrix)
+
+        # 构建对齐映射
+        alignment_map = {}
+        valid_matches = 0
+        total_similarity = 0.0
+
+        for pre_idx, cur_idx in zip(pre_indices, cur_indices):
+            similarity = similarity_matrix[pre_idx, cur_idx].item()
+
+            match_info = {
+                'cur_idx': cur_idx,
+                'cur_label': cur_labels[cur_idx],
+                'similarity': similarity,
+                'is_valid': similarity > self.alignment_threshold  # 使用降低的阈值
+            }
+
+            alignment_map[pre_idx] = match_info
+            total_similarity += similarity
+
+            if similarity > self.alignment_threshold:
+                valid_matches += 1
+                self.logger.debug(f"✓ Old class {pre_idx} -> cur[{cur_idx}] (sim: {similarity:.3f})")
+            else:
+                self.logger.debug(f"✗ Low quality: old class {pre_idx} -> cur[{cur_idx}] (sim: {similarity:.3f})")
+
+        # 计算对齐质量
+        if len(pre_indices) > 0:
+            avg_similarity = total_similarity / len(pre_indices)
+            valid_ratio = valid_matches / len(pre_indices)
+            alignment_quality = avg_similarity * valid_ratio
+        else:
+            alignment_quality = 0.0
+
+        self.logger.info(
+            f"简化匈牙利对齐结果: {valid_matches}/{len(pre_indices)} 有效匹配, 质量分数: {alignment_quality:.3f}")
+
+        return alignment_map, alignment_quality
 
     def _extract_seen_novel_after_hungarian(self, cur_prototypes, cur_labels, hungarian_alignment_map):
         """匈牙利匹配后析出seen novel原型"""
@@ -321,10 +463,10 @@ class ProtoAugManager:
         if len(self.prototypes) > num_prev_old:
             # 存在previous novel prototypes
             prev_novel_prototypes = self.prototypes[num_prev_old:]
-            prev_novel_norm = F.normalize(prev_novel_prototypes, dim=1)
+            prev_novel_norm = F.normalize(prev_novel_prototypes, dim=1).to(self.device)
 
             for cur_idx in candidate_indices:
-                cur_proto_norm = F.normalize(cur_prototypes[cur_idx:cur_idx + 1], dim=1)
+                cur_proto_norm = F.normalize(cur_prototypes[cur_idx:cur_idx + 1], dim=1).to(self.device)
                 similarities = torch.mm(cur_proto_norm, prev_novel_norm.T).squeeze(0)
                 max_similarity = similarities.max().item() if len(similarities) > 0 else 0.0
 
@@ -346,6 +488,43 @@ class ProtoAugManager:
             return torch.stack(seen_novel_prototypes), seen_novel_labels
         else:
             return None, []
+
+    def _extract_all_remaining_as_seen_novel(self, cur_prototypes, cur_labels, hungarian_alignment_map):
+        """
+        简化的seen novel析出：所有未被匹配为old的原型都作为seen novel
+        """
+        # 找到被有效对齐的cur原型索引
+        valid_aligned_cur_indices = {
+            info['cur_idx'] for info in hungarian_alignment_map.values()
+            if info['is_valid']
+        }
+
+        # 剩余的全部作为seen novel
+        all_cur_indices = set(range(len(cur_prototypes)))
+        seen_novel_indices = all_cur_indices - valid_aligned_cur_indices
+
+        self.logger.info(f"识别为old类: {len(valid_aligned_cur_indices)} 个")
+        self.logger.info(f"识别为seen novel: {len(seen_novel_indices)} 个")
+
+        if len(seen_novel_indices) == 0:
+            self.logger.info("✗ 未发现seen novel类")
+            return None, []
+
+        # 收集所有seen novel原型
+        seen_novel_prototypes = []
+        seen_novel_labels = []
+
+        for cur_idx in seen_novel_indices:
+            seen_novel_prototypes.append(cur_prototypes[cur_idx])
+            seen_novel_labels.append(cur_labels[cur_idx])
+            self.logger.debug(f"✓ Seen novel: cur[{cur_idx}] -> label[{cur_labels[cur_idx]}]")
+
+        if seen_novel_prototypes:
+            self.logger.info(f"✓ 成功析出 {len(seen_novel_prototypes)} 个seen novel原型")
+            return torch.stack(seen_novel_prototypes), seen_novel_labels
+        else:
+            return None, []
+
 
     def compute_enhanced_proto_aug_loss(self, model, current_features=None):
         """

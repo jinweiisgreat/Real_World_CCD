@@ -335,8 +335,12 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
         args.logger.info(f"\n=== Session {current_session}: 开始原型析出 ===")
 
         # 步骤1: 原型析出 - 匈牙利匹配识别seen novel原型
+        # seen_novel_prototypes, distillation_info = proto_aug_manager.prototype_distillation_with_hungarian(
+        #     student, args.num_labeled_classes, train_loader
+        # )
+
         seen_novel_prototypes, distillation_info = proto_aug_manager.prototype_distillation_with_hungarian(
-            student, args.num_labeled_classes, train_loader
+            student, train_loader
         )
 
         args.logger.info(f"原型析出完成: {distillation_info}")
@@ -497,7 +501,7 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
                     len(proto_aug_manager.current_seen_novel_prototypes) > 0):
                 # 步骤2&3: 软分配 + 对比学习
                 seen_novel_loss, seen_novel_details = proto_aug_manager.seen_novel_cl.compute_comprehensive_seen_novel_loss(
-                    student_proj, proto_aug_manager.current_seen_novel_prototypes, student
+                    feats, proto_aug_manager.current_seen_novel_prototypes, student
                 )
 
             # 主任务损失组合

@@ -1,3 +1,10 @@
+import torch
+import torch.nn.functional as F
+import numpy as np
+from scipy.optimize import linear_sum_assignment
+from tqdm import tqdm
+from copy import deepcopy
+
 class SeenNovelContrastiveLearning:
     """
     Seen Novel对比学习核心模块
@@ -36,8 +43,8 @@ class SeenNovelContrastiveLearning:
         batch_size = features.shape[0]
 
         # 归一化特征和原型
-        features_norm = F.normalize(features, dim=1)  # [B, D]
-        prototypes_norm = F.normalize(seen_novel_prototypes, dim=1)  # [K, D]
+        features_norm = F.normalize(features, dim=1).to(self.device)  # [B, D]
+        prototypes_norm = F.normalize(seen_novel_prototypes, dim=1).to(self.device)  # [K, D]
 
         # 计算相似度矩阵 [B, K]
         similarities = torch.mm(features_norm, prototypes_norm.T)

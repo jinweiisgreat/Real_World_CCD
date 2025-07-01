@@ -4,7 +4,7 @@
 set -e
 set -x
 
-CUDA_VISIBLE_DEVICES=0 python train_trainable.py \
+CUDA_VISIBLE_DEVICES=0 python train_SeenNovel.py \
     --dataset_name 'cifar100' \
     --batch_size 128 \
     --transform 'imagenet' \
