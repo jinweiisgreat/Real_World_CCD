@@ -53,18 +53,20 @@ class InterClassConstraintLoss(nn.Module):
     def __init__(self):
         super().__init__()
 
-    def forward(self, model, prototypes):
+    def forward(self, model):
         """
         计算类间约束损失
         Args:
             model: 当前模型
-            prototypes: 类别原型 [num_classes, feature_dim]
         """
         boundary_weights = model[1].boundary_weights  # [num_classes]
         classifier_weights = model[1].last_layer.weight_v  # [num_classes, feature_dim]
 
         num_classes = boundary_weights.size(0)
         total_loss = 0.0
+
+        # 将分类器权重归一化作为原型
+        prototypes = F.normalize(classifier_weights, dim=-1)
 
         for i in range(num_classes):
             for j in range(num_classes):
@@ -77,6 +79,7 @@ class InterClassConstraintLoss(nn.Module):
                     total_loss += torch.clamp(constraint_value, min=0)
 
         return total_loss / (num_classes * (num_classes - 1))
+
 
 class ContrastiveLearningViewGenerator(object):
     """Take two random crops of one image as the query and key."""

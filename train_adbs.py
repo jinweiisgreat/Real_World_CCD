@@ -187,25 +187,26 @@ def test_offline(model, test_loader, epoch, save_name, args):
 '''online train and test'''
 '''====================================================================================================================='''
 def train_online(student, student_pre, proto_aug_manager, train_loader, test_loader, current_session, args):
-
     inter_class_loss = InterClassConstraintLoss()
-
     params_groups = get_params_groups(student)
     optimizer = SGD(params_groups, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
 
     exp_lr_scheduler = lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=args.epochs_online_per_session,
-            eta_min=args.lr * 1e-3,
-        )
+        optimizer,
+        T_max=args.epochs_online_per_session,
+        eta_min=args.lr * 1e-3,
+    )
 
     cluster_criterion = DistillLoss(
-                        args.warmup_teacher_temp_epochs,
-                        args.epochs_online_per_session,
-                        args.n_views,
-                        args.warmup_teacher_temp,
-                        args.teacher_temp,
-                    )
+        args.warmup_teacher_temp_epochs,
+        args.epochs_online_per_session,
+        args.n_views,
+        args.warmup_teacher_temp,
+        args.teacher_temp,
+    )
+
+    # 设备定义
+    device = torch.device('cuda:0')
 
     # best acc log
     best_test_acc_all = 0
@@ -223,8 +224,8 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
         student_pre.eval()
         for batch_idx, batch in enumerate(train_loader):
 
-            images, class_labels, uq_idxs, _ = batch   # NOTE!!!   mask lab in this setting
-            mask_lab = torch.zeros_like(class_labels)   # NOTE!!! all samples are unlabeled
+            images, class_labels, uq_idxs, _ = batch
+            mask_lab = torch.zeros_like(class_labels)
 
             class_labels, mask_lab = class_labels.cuda(non_blocking=True), mask_lab.cuda(non_blocking=True).bool()
             images = torch.cat(images, dim=0).cuda(non_blocking=True)
@@ -240,25 +241,28 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             avg_probs_old_in = avg_probs[:args.num_seen_classes]
             avg_probs_new_in = avg_probs[args.num_seen_classes:]
 
-            # torch.sum(avg_probs_old_in) 将所有旧类别的预测概率加总，得到模型对旧类别的整体关注程度。avg_probs_new_marginal同理。
             avg_probs_old_marginal, avg_probs_new_marginal = torch.sum(avg_probs_old_in), torch.sum(avg_probs_new_in)
-            me_max_loss_old_new =  avg_probs_old_marginal * torch.log(avg_probs_old_marginal) + avg_probs_new_marginal * torch.log(avg_probs_new_marginal) + math.log(2)
+            me_max_loss_old_new = avg_probs_old_marginal * torch.log(
+                avg_probs_old_marginal) + avg_probs_new_marginal * torch.log(avg_probs_new_marginal) + math.log(2)
 
             # 2. old (intra) & new (intra)
-            avg_probs_old_in_norm = avg_probs_old_in / torch.sum(avg_probs_old_in)   # norm
-            avg_probs_new_in_norm = avg_probs_new_in / torch.sum(avg_probs_new_in)   # norm
-            me_max_loss_old_in = - torch.sum(torch.log(avg_probs_old_in_norm**(-avg_probs_old_in_norm))) + math.log(float(len(avg_probs_old_in_norm)))
+            avg_probs_old_in_norm = avg_probs_old_in / torch.sum(avg_probs_old_in)
+            avg_probs_new_in_norm = avg_probs_new_in / torch.sum(avg_probs_new_in)
+            me_max_loss_old_in = - torch.sum(torch.log(avg_probs_old_in_norm ** (-avg_probs_old_in_norm))) + math.log(
+                float(len(avg_probs_old_in_norm)))
             if args.num_novel_class_per_session > 1:
-                me_max_loss_new_in = - torch.sum(torch.log(avg_probs_new_in_norm**(-avg_probs_new_in_norm))) + math.log(float(len(avg_probs_new_in_norm)))
+                me_max_loss_new_in = - torch.sum(
+                    torch.log(avg_probs_new_in_norm ** (-avg_probs_new_in_norm))) + math.log(
+                    float(len(avg_probs_new_in_norm)))
             else:
                 me_max_loss_new_in = torch.tensor(0.0, device=device)
             cluster_loss += args.memax_old_new_weight * me_max_loss_old_new + \
-                args.memax_old_in_weight * me_max_loss_old_in + args.memax_new_in_weight * me_max_loss_new_in
-
+                            args.memax_old_in_weight * me_max_loss_old_in + args.memax_new_in_weight * me_max_loss_new_in
 
             # represent learning, unsup
             contrastive_logits, contrastive_labels = info_nce_logits(features=student_proj)
             contrastive_loss = torch.nn.CrossEntropyLoss()(contrastive_logits, contrastive_labels)
+
             # ProtoAug_Loss
             proto_aug_loss = proto_aug_manager.compute_proto_aug_hardness_aware_loss(student)
             feats = student[0](images)
@@ -267,24 +271,10 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
                 feats_pre = student_pre[0](images)
                 feats_pre = torch.nn.functional.normalize(feats_pre, dim=-1)
 
-            # 这行代码计算的是特征蒸馏损失，用于让学生网络的特征模仿教师网络的输出，从而在增量学习中帮助保留之前学到的知识，减少灾难性遗忘。
-            feat_distill_loss = (feats-feats_pre).pow(2).sum() / len(feats)
+            feat_distill_loss = (feats - feats_pre).pow(2).sum() / len(feats)
 
-            current_prototypes = []
-            with torch.no_grad():
-                for c in range(args.num_labeled_classes + args.num_cur_novel_classes):
-                    if c < args.num_seen_classes:
-                        # 使用ProtoAug中保存的原型
-                        prototype = proto_aug_manager.prototypes[c]
-                    else:
-                        # 对于新类别，使用分类器权重作为临时原型
-                        prototype = F.normalize(student[1].last_layer.weight_v.data[c], dim=-1)
-                    current_prototypes.append(prototype)
-
-            current_prototypes = torch.stack(current_prototypes).to(device)
-
-            # 计算类间约束损失
-            ic_loss = inter_class_loss(student, current_prototypes)
+            # 计算类间约束损失（使用分类器权重，不需要额外的原型）
+            ic_loss = inter_class_loss(student)
 
             # Total loss
             loss = 0
@@ -292,7 +282,7 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             loss += 1 * contrastive_loss
             loss += args.proto_aug_weight * proto_aug_loss
             loss += args.feat_distill_weight * feat_distill_loss
-            loss += 0.1 * ic_loss  # ADBS权重
+            loss += 0.1 * ic_loss
 
             # logs
             pstr = ''
@@ -303,8 +293,7 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             pstr += f'contrastive_loss: {contrastive_loss.item():.4f} '
             pstr += f'proto_aug_loss: {proto_aug_loss.item():.4f} '
             pstr += f'feat_distill_loss: {feat_distill_loss.item():.4f} '
-            pstr += f'ic_loss: {ic_loss.item():.4f} '  # 添加ADBS损失日志
-
+            pstr += f'ic_loss: {ic_loss.item():.4f} '
 
             loss_record.update(loss.item(), class_labels.size(0))
             optimizer.zero_grad()
@@ -320,12 +309,13 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
 
             if batch_idx % args.print_freq == 0:
                 args.logger.info('Epoch: [{}][{}/{}]\t loss {:.5f}\t {}'
-                            .format(epoch, batch_idx, len(train_loader), loss.item(), pstr))
-                new_true_ratio = len(class_labels[class_labels>=args.num_seen_classes]) / len(class_labels)
+                                 .format(epoch, batch_idx, len(train_loader), loss.item(), pstr))
+                new_true_ratio = len(class_labels[class_labels >= args.num_seen_classes]) / len(class_labels)
                 logits = student_out / 0.1
                 preds = logits.argmax(1)
-                new_pred_ratio = len(preds[preds>=args.num_seen_classes]) / len(preds)
-                args.logger.info(f'Avg old prob: {torch.sum(avg_probs_old_in).item():.4f} | Avg new prob: {torch.sum(avg_probs_new_in).item():.4f} | Pred new ratio: {new_pred_ratio:.4f} | Ground-truth new ratio: {new_true_ratio:.4f}')
+                new_pred_ratio = len(preds[preds >= args.num_seen_classes]) / len(preds)
+                args.logger.info(
+                    f'Avg old prob: {torch.sum(avg_probs_old_in).item():.4f} | Avg new prob: {torch.sum(avg_probs_new_in).item():.4f} | Pred new ratio: {new_pred_ratio:.4f} | Ground-truth new ratio: {new_true_ratio:.4f}')
 
         args.logger.info('Train Epoch: {} Avg Loss: {:.4f} '.format(epoch, loss_record.avg))
 

@@ -92,32 +92,6 @@ class ProtoAugManager:
 
         return proto_aug_loss
 
-
-    # def compute_proto_aug_hardness_aware_loss(self, model):
-    #     prototypes = F.normalize(self.prototypes, dim=-1, p=2).to(self.device)
-    #
-    #     # 获取边界权重来调整hardness计算
-    #     with torch.no_grad():
-    #         boundary_weights = model[1].boundary_weights[:len(prototypes)]
-    #
-    #         # 结合边界权重调整hardness分布
-    #         # 边界权重越小的类别（更紧凑），hardness应该相对更高
-    #         boundary_adjusted_hardness = self.mean_similarity / boundary_weights
-    #         sampling_prob = F.softmax(boundary_adjusted_hardness / self.hardness_temp, dim=-1)
-    #         sampling_prob = sampling_prob.detach().cpu().numpy()
-    #
-    #     prototypes_labels = np.random.choice(len(prototypes), size=(self.batch_size,), replace=True, p=sampling_prob)
-    #     prototypes_labels = torch.from_numpy(prototypes_labels).long().to(self.device)
-    #
-    #     prototypes_sampled = prototypes[prototypes_labels]
-    #     prototypes_augmented = prototypes_sampled + torch.randn((self.batch_size, self.feature_dim),
-    #                                                             device=self.device) * self.radius * self.radius_scale
-    #
-    #     _, prototypes_output = model[1](prototypes_augmented)
-    #     proto_aug_loss = nn.CrossEntropyLoss()(prototypes_output / 0.1, prototypes_labels)
-    #
-    #     return proto_aug_loss
-
     def update_prototypes_offline(self, model, train_loader, num_labeled_classes):
         model.eval()
 
