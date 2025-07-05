@@ -33,7 +33,7 @@ from project_utils.cluster_and_log_utils import log_accs_from_preds
 from data.augmentations import get_transform
 from data.get_datasets import get_class_splits, ContrastiveLearningViewGenerator, get_datasets
 
-from models.utils_simgcd import DINOHead, get_params_groups, SupConLoss, info_nce_logits, DistillLoss
+from models.utils_simgcd import DINOHead, get_params_groups, SupConLoss, info_nce_logits, DistillLoss, SinkhornKnopp
 from models.utils_simgcd_pro_prompt_trainable import get_kmeans_centroid_for_new_head
 from models.utils_proto_aug_SeenNovel import ProtoAugManager
 from models import vision_transformer as vits
@@ -327,20 +327,16 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
     assert isinstance(student, PromptEnhancedModel), f"Expected PromptEnhancedModel but got {type(student)}"
     assert isinstance(student_pre, PromptEnhancedModel), f"Expected PromptEnhancedModel but got {type(student_pre)}"
 
-    # ========== 训练前的原型析出（新增） ==========
+    # ========== 训练前的原型析出（修正版） ==========
     seen_novel_prototypes = None
     distillation_info = {}
 
     if current_session > 1:
         args.logger.info(f"\n=== Session {current_session}: 开始原型析出 ===")
 
-        # 步骤1: 原型析出 - 匈牙利匹配识别seen novel原型
-        # seen_novel_prototypes, distillation_info = proto_aug_manager.prototype_distillation_with_hungarian(
-        #     student, args.num_labeled_classes, train_loader
-        # )
-
+        # 修正版原型析出 - 传入当前session参数
         seen_novel_prototypes, distillation_info = proto_aug_manager.prototype_distillation_with_hungarian(
-            student, train_loader
+            student, train_loader, current_session=current_session  # 添加current_session参数
         )
 
         args.logger.info(f"原型析出完成: {distillation_info}")
@@ -472,6 +468,24 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
                     float(len(avg_probs_new_in_norm)))
             else:
                 me_max_loss_new_in = torch.tensor(0.0, device=args.device)
+
+            # # ========== Sinkhorn 正则化 for unseen classes ==========
+            # sinkhorn_loss = torch.tensor(0.0, device=args.device)
+            #
+            # # 只对 unseen novel classes 应用 Sinkhorn 约束
+            # if args.num_seen_classes < student_out.shape[1]:
+            #     unseen_logits = student_out[:, args.num_seen_classes:]  # [2*B, num_unseen]
+            #
+            #     if unseen_logits.shape[1] > 0:
+            #         sk = SinkhornKnopp()
+            #
+            #         # 获取 Sinkhorn 分配
+            #         with torch.no_grad():
+            #             assignments = sk(unseen_logits / 0.1)  # [2*B, num_unseen]
+            #
+            #         # 计算 Sinkhorn 损失：软标签交叉熵
+            #         log_probs = F.log_softmax(unseen_logits / 0.1, dim=1)
+            #         sinkhorn_loss = -torch.sum(assignments * log_probs, dim=1).mean()
 
             # 总熵损失
             cluster_loss += args.memax_old_new_weight * me_max_loss_old_new + \
@@ -971,6 +985,9 @@ if __name__ == "__main__":
                         help='Temperature for seen novel contrastive learning')
     parser.add_argument('--alignment_threshold', type=float, default=0.7,
                         help='Similarity threshold for Hungarian alignment of old classes')
+
+    parser.add_argument('--sinkhorn_weight', type=float, default=1.0,
+                        help='Weight for Sinkhorn regularization on unseen classes')
 
     # ----------------------
     # INIT

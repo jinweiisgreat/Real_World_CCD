@@ -60,6 +60,7 @@ class ProtoAugManager:
         return proto_aug_loss
 
     # 在每个在线阶段(Online Session)中，使用上一阶段保存的原型和难度分布进行采样
+
     def compute_proto_aug_hardness_aware_loss(self, model):
         prototypes = F.normalize(self.prototypes, dim=-1, p=2).to(self.device)
 
@@ -68,7 +69,7 @@ class ProtoAugManager:
         # mean_similarity越高，表示原型之间越相似，采样概率越高，越需要关注这部分。
         sampling_prob = F.softmax(self.mean_similarity / self.hardness_temp, dim=-1)
         sampling_prob = sampling_prob.cpu().numpy()
-        # prototypes_labels = [5,5,6,7,9,11...] (范围是t-1 session的原型个数)
+        # prototypes_labels = [5,5,6,7,9,11...] (范围是Session t-1的原型个数,即 Seen 的类别数)
         prototypes_labels = np.random.choice(len(prototypes), size=(self.batch_size,), replace=True, p=sampling_prob)
 
         prototypes_labels = torch.from_numpy(prototypes_labels).long().to(self.device)
@@ -90,6 +91,32 @@ class ProtoAugManager:
         proto_aug_loss = nn.CrossEntropyLoss()(prototypes_output / 0.1, prototypes_labels)
 
         return proto_aug_loss
+
+
+    # def compute_proto_aug_hardness_aware_loss(self, model):
+    #     prototypes = F.normalize(self.prototypes, dim=-1, p=2).to(self.device)
+    #
+    #     # 获取边界权重来调整hardness计算
+    #     with torch.no_grad():
+    #         boundary_weights = model[1].boundary_weights[:len(prototypes)]
+    #
+    #         # 结合边界权重调整hardness分布
+    #         # 边界权重越小的类别（更紧凑），hardness应该相对更高
+    #         boundary_adjusted_hardness = self.mean_similarity / boundary_weights
+    #         sampling_prob = F.softmax(boundary_adjusted_hardness / self.hardness_temp, dim=-1)
+    #         sampling_prob = sampling_prob.detach().cpu().numpy()
+    #
+    #     prototypes_labels = np.random.choice(len(prototypes), size=(self.batch_size,), replace=True, p=sampling_prob)
+    #     prototypes_labels = torch.from_numpy(prototypes_labels).long().to(self.device)
+    #
+    #     prototypes_sampled = prototypes[prototypes_labels]
+    #     prototypes_augmented = prototypes_sampled + torch.randn((self.batch_size, self.feature_dim),
+    #                                                             device=self.device) * self.radius * self.radius_scale
+    #
+    #     _, prototypes_output = model[1](prototypes_augmented)
+    #     proto_aug_loss = nn.CrossEntropyLoss()(prototypes_output / 0.1, prototypes_labels)
+    #
+    #     return proto_aug_loss
 
     def update_prototypes_offline(self, model, train_loader, num_labeled_classes):
         model.eval()

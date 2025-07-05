@@ -261,6 +261,24 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
                 me_max_loss_new_in = - torch.sum(torch.log(avg_probs_new_in_norm**(-avg_probs_new_in_norm))) + math.log(float(len(avg_probs_new_in_norm)))
             else:
                 me_max_loss_new_in = torch.tensor(0.0, device=device)
+
+            # # ========== Sinkhorn 正则化 for unseen classes ==========
+            # sinkhorn_loss = torch.tensor(0.0, device=device)
+            #
+            # # 只对 unseen novel classes 应用 Sinkhorn 约束
+            # if args.num_seen_classes < student_out.shape[1]:
+            #     unseen_logits = student_out[:, args.num_seen_classes:]  # [2*B, num_unseen]
+            #
+            #     if unseen_logits.shape[1] > 0:
+            #         sk = SinkhornKnopp()
+            #
+            #         # 获取 Sinkhorn 分配
+            #         with torch.no_grad():
+            #             assignments = sk(unseen_logits / 0.1)  # [2*B, num_unseen]
+            #
+            #         # 计算 Sinkhorn 损失：软标签交叉熵
+            #         log_probs = F.log_softmax(unseen_logits / 0.1, dim=1)
+            #         sinkhorn_loss = -torch.sum(assignments * log_probs, dim=1).mean()
             # overall me-max loss
             cluster_loss += args.memax_old_new_weight * me_max_loss_old_new + \
                 args.memax_old_in_weight * me_max_loss_old_in + args.memax_new_in_weight * me_max_loss_new_in
@@ -538,6 +556,8 @@ if __name__ == "__main__":
     # others
     parser.add_argument('--print_freq', default=10, type=int)
     parser.add_argument('--exp_name', default='simgcd-pro-v5', type=str)
+    # parser.add_argument('--sinkhorn_weight', type=float, default=1.0,
+    #                     help='Weight for Sinkhorn regularization on unseen classes')
 
 
     # ----------------------

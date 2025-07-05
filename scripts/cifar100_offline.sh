@@ -4,7 +4,7 @@ set -e
 set -x
 
 # Run training script with parameters
-CUDA_VISIBLE_DEVICES=0 python train_trainable.py \
+CUDA_VISIBLE_DEVICES=0 python train_adbs.py \
     --dataset_name 'cifar100' \
     --batch_size 128 \
     --transform 'imagenet' \
@@ -18,6 +18,6 @@ CUDA_VISIBLE_DEVICES=0 python train_trainable.py \
     --continual_session_num 5 \
     --online_novel_unseen_num 400 \
     --online_old_seen_num 25 \
-    --online_novel_seen_num 25 \
-    --prompt_pool \
-    --enable_prompt_training
+    --online_novel_seen_num 25
+#    --prompt_pool \
+#    --enable_prompt_training
