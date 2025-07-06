@@ -523,8 +523,8 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             main_loss += args.proto_aug_weight * proto_aug_loss + args.feat_distill_weight * feat_distill_loss
 
             # 添加seen novel对比学习损失
-            seen_novel_weight = getattr(args, 'seen_novel_weight', 0.5)  # 默认权重0.5
-            main_loss += seen_novel_weight * seen_novel_loss
+            # seen_novel_weight = getattr(args, 'seen_novel_weight', 0.5)  # 默认权重0.5
+            # main_loss += seen_novel_weight * seen_novel_loss
 
             # ========== Prompt损失计算 ==========
             # 在线阶段更积极地训练prompt

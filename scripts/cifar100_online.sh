@@ -4,7 +4,7 @@
 set -e
 set -x
 
-CUDA_VISIBLE_DEVICES=0 python train_happy.py \
+CUDA_VISIBLE_DEVICES=0 python train_adbs.py \
     --dataset_name 'cifar100' \
     --batch_size 128 \
     --transform 'imagenet' \
@@ -29,7 +29,7 @@ CUDA_VISIBLE_DEVICES=0 python train_happy.py \
     --online_old_seen_num 25 \
     --online_novel_seen_num 25 \
     --init_new_head \
-    --load_offline_id Old50_Ratio0.8_20250527-153553\
+    --load_offline_id Old50_Ratio0.8_20250705-191755\
     --shuffle_classes \
     --seed 0
 #    --prompt_pool\

@@ -42,7 +42,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 '''offline train and test'''
 '''====================================================================================================================='''
 def train_offline(student, train_loader, test_loader, args):
-
+    inter_class_loss = InterClassConstraintLoss()
     params_groups = get_params_groups(student)
     optimizer = SGD(params_groups, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
 
@@ -98,11 +98,13 @@ def train_offline(student, train_loader, test_loader, args):
 
             sup_con_labels = class_labels[mask_lab]
             sup_con_loss = SupConLoss()(student_proj, labels=sup_con_labels)
+            ic_loss = inter_class_loss(student)
 
             # Total loss
             loss = 0
             loss += (1 - args.sup_weight) * cluster_loss + args.sup_weight * cls_loss
             loss += (1 - args.sup_weight) * contrastive_loss + args.sup_weight * sup_con_loss
+            loss += 0.1 * ic_loss
 
 
             # logs
@@ -111,6 +113,7 @@ def train_offline(student, train_loader, test_loader, args):
             pstr += f'cluster_loss: {cluster_loss.item():.4f} '
             pstr += f'sup_con_loss: {sup_con_loss.item():.4f} '
             pstr += f'contrastive_loss: {contrastive_loss.item():.4f} '
+            pstr += f'ic_loss: {ic_loss.item():.4f} '
 
             loss_record.update(loss.item(), class_labels.size(0))
             optimizer.zero_grad()
@@ -397,10 +400,8 @@ def test_online(model, test_loader, epoch, save_name, args):
             # Get model predictions
             try:
                 _, logits = model(images)
-                batch_preds = logits.argmax(1).cpu().numpy()
             except:
                 logits = model(images)
-                batch_preds = logits.argmax(1).cpu().numpy()
 
             batch_preds = logits.argmax(1).cpu().numpy()
             preds.append(batch_preds)
