@@ -99,10 +99,10 @@ class ProtoAugManager:
         all_labels_list = []
         # forward data
         for batch_idx, (images, label, _) in enumerate(tqdm(train_loader)):   # NOTE!!!
-            images = images.cuda(non_blocking=True)
+            images = images.cuda(non_blocking=True) # shape: (batch_size*2, 3, 224, 224)
             with torch.no_grad():
                 feats = model[0](images)   # backbone
-                feats = torch.nn.functional.normalize(feats, dim=-1)
+                feats = torch.nn.functional.normalize(feats, dim=-1)  # shape: (batch_size*2, feature_dim) (256,768)
                 all_feats_list.append(feats)
                 all_labels_list.append(label)
         all_feats = torch.cat(all_feats_list, dim=0)

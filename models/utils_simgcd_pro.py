@@ -26,7 +26,7 @@ def get_kmeans_centroid_for_new_head(model, online_session_train_loader, args, d
     # First extract all features
     with torch.no_grad():
         for batch_idx, (images, label, _, _) in enumerate(tqdm(online_session_train_loader)):
-            images = images.cuda(non_blocking=True)
+            images = images.cuda(non_blocking=True) # shape: (batch_size*2, 3, 224, 224)
             # Pass features through base model and then additional learnable transform (linear layer)
             feats = model[0](images)   # backbone
             feats = torch.nn.functional.normalize(feats, dim=-1)
@@ -50,7 +50,7 @@ def get_kmeans_centroid_for_new_head(model, online_session_train_loader, args, d
         model[1]内部的last_layer计算质心向量与已知类别原型间的余弦相似度
         这产生logits张量，表示每个质心属于已知类别的可能性
         """
-        _, logits = model[1](centroids)   # torch.Size([60, 50])
+        _, logits = model[1](centroids)   # torch.Size([60, 50]) 从50个已知类分类头去预测60个类（新来了10个）它利用了旧模型的"无知"来识别新类！
         max_logits, _ = torch.max(logits, dim=-1)   # torch.Size([60])
         _, proto_idx = torch.topk(max_logits, k=args.num_novel_class_per_session, largest=False)   # torch.Size([10]) 当largest=False时，返回最小的k个元素
         new_head = centroids[proto_idx]   # torch.Size([10, 768])

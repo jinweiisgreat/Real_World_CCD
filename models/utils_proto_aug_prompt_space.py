@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
+from models.prompt_enhanced_model import PromptEnhancedModel
 
 
 '''
@@ -11,170 +12,251 @@ from tqdm import tqdm
 '''
 
 
-class ProtoAugManager:
-    def __init__(self, feature_dim, batch_size, hardness_temp, radius_scale, device, logger):
+class ProtoAugSpacingManager:
+    def __init__(self, feature_dim, batch_size, hardness_temp, radius_scale, device, logger,
+                 spacing_alpha=1.2, spacing_weight=1.0):
         self.feature_dim = feature_dim
         self.batch_size = batch_size
         self.device = device
         self.prototypes = None
-        self.mean_similarity = None   # NOTE!!! mean similarity of each prototype, for hardness-aware sampling
-        self.hardness_temp = hardness_temp   # NOTE!!! temperature to compute mean similarity to softmax prob for hardness-aware sampling
+        self.mean_similarity = None
+        self.hardness_temp = hardness_temp
         self.radius = 0
         self.radius_scale = radius_scale
         self.logger = logger
 
+        # Spacing Loss 相关参数
+        self.spacing_alpha = spacing_alpha  # 距离放大因子
+        self.spacing_weight = spacing_weight  # spacing loss权重
+        self.equidistant_points = None  # 等距点缓存
 
     def save_proto_aug_dict(self, save_path):
         proto_aug_dict = {
             'prototypes': self.prototypes,
             'radius': self.radius,
             'mean_similarity': self.mean_similarity,
+            'equidistant_points': self.equidistant_points,
+            'spacing_alpha': self.spacing_alpha,
         }
-
         torch.save(proto_aug_dict, save_path)
 
-    # load continual   # NOTE!!!
     def load_proto_aug_dict(self, load_path):
         proto_aug_dict = torch.load(load_path)
-
         self.prototypes = proto_aug_dict['prototypes']
         self.radius = proto_aug_dict['radius']
         self.mean_similarity = proto_aug_dict['mean_similarity']
+        self.equidistant_points = proto_aug_dict.get('equidistant_points', None)
+        self.spacing_alpha = proto_aug_dict.get('spacing_alpha', 1.2)
 
+    def compute_equidistant_points(self):
+        """计算等距点，只在prototypes更新时调用"""
+        if self.prototypes is None or len(self.prototypes) < 2:
+            return None
 
-    def compute_proto_aug_loss(self, model):
-        prototypes = F.normalize(self.prototypes, dim=-1, p=2).to(self.device)
-        prototypes_labels = torch.randint(0, len(prototypes), (self.batch_size,)).to(self.device)   # dtype=torch.long
-        prototypes_sampled = prototypes[prototypes_labels]
-        prototypes_augmented = prototypes_sampled + torch.randn((self.batch_size, self.feature_dim), device=self.device) * self.radius * self.radius_scale
-        #prototypes_augmented = F.normalize(prototypes_augmented, dim=-1, p=2) # NOTE!!! DO NOT normalize
-        # forward prototypes and get logits
-        _, prototypes_output = model[1](prototypes_augmented)
-        proto_aug_loss = nn.CrossEntropyLoss()(prototypes_output / 0.1, prototypes_labels)
+        prototypes = F.normalize(self.prototypes, dim=-1, p=2)
+        num_classes = len(prototypes)
 
-        return proto_aug_loss
+        # 计算最大距离
+        distances = torch.cdist(prototypes, prototypes)
+        max_distance = distances.max().item()
+        target_distance = self.spacing_alpha * max_distance
 
-    # 在每个在线阶段(Online Session)中，使用上一阶段保存的原型和难度分布进行采样
+        # 构建目标距离矩阵
+        target_distances = torch.full((num_classes, num_classes), target_distance, device=self.device)
+        target_distances.fill_diagonal_(0)
+
+        # 简化的等距点计算：使用MDS的近似方法
+        equidistant_points = self._approximate_mds(target_distances, prototypes)
+
+        return equidistant_points
+
+    def _approximate_mds(self, target_distances, initial_points):
+        """简化的多维标定，迭代优化"""
+        points = initial_points.clone()
+        num_classes = len(points)
+
+        # 简单的迭代优化
+        for _ in range(10):  # 限制迭代次数
+            current_distances = torch.cdist(points, points)
+
+            # 计算梯度方向（简化版）
+            for i in range(num_classes):
+                for j in range(i + 1, num_classes):
+                    current_dist = current_distances[i, j]
+                    target_dist = target_distances[i, j]
+
+                    if current_dist > 0:
+                        direction = (points[i] - points[j]) / current_dist
+                        adjustment = 0.1 * (target_dist - current_dist) * direction
+                        points[i] += adjustment / 2
+                        points[j] -= adjustment / 2
+
+            # 重新归一化
+            points = F.normalize(points, dim=-1, p=2)
+
+        return points
+
+    def compute_spacing_loss(self):
+        """计算spacing loss，直接使用缓存的等距点"""
+        if self.equidistant_points is None:
+            return torch.tensor(0.0, device=self.device)
+
+        prototypes_norm = F.normalize(self.prototypes, dim=-1, p=2)
+        spacing_loss = F.mse_loss(prototypes_norm, self.equidistant_points)
+
+        return spacing_loss
 
     def compute_proto_aug_hardness_aware_loss(self, model):
+        """计算综合的prototype augmentation损失，包含spacing loss"""
+        if self.prototypes is None:
+            return torch.tensor(0.0, device=self.device)
+
         prototypes = F.normalize(self.prototypes, dim=-1, p=2).to(self.device)
 
-        # hardness-aware sampling
-        # 通过hardness-aware sampling机制，使用 sampling_prob 来控制采样概率
-        # mean_similarity越高，表示原型之间越相似，采样概率越高，越需要关注这部分。
+        # 原始的hardness-aware sampling
         sampling_prob = F.softmax(self.mean_similarity / self.hardness_temp, dim=-1)
         sampling_prob = sampling_prob.cpu().numpy()
-        # prototypes_labels = [5,5,6,7,9,11...] (范围是Session t-1的原型个数,即 Seen 的类别数)
         prototypes_labels = np.random.choice(len(prototypes), size=(self.batch_size,), replace=True, p=sampling_prob)
-
         prototypes_labels = torch.from_numpy(prototypes_labels).long().to(self.device)
 
         prototypes_sampled = prototypes[prototypes_labels]
-        """
-        参考ProtoAug论文
-        prototypes_sampled 是一个原型矩阵(batch_size,feature_dim)
-        prototypes_augmented 是prototypes_sampled经过加强的原型矩阵
-        然后用t-1时刻的prototypes_augmented喂给t时刻分类器，以强化seen类的分类边界
-        """
-        # 从分布中采样
-        # prototypes_augmented 包含了 batch_size 个样本
-        prototypes_augmented = prototypes_sampled + torch.randn((self.batch_size, self.feature_dim), device=self.device) * self.radius * self.radius_scale
-        # prototypes_augmented = F.normalize(prototypes_augmented, dim=-1, p=2) # NOTE!!! DO NOT normalize
-        # forward prototypes and get logits
-        _, prototypes_output = model[1](prototypes_augmented)
-        # 这种机制确保了即使在特征空间中偏离中心点，模型仍能保持类别决策边界的稳定性
+        prototypes_augmented = prototypes_sampled + torch.randn((self.batch_size, self.feature_dim),
+                                                                device=self.device) * self.radius * self.radius_scale
+
+        # 根据模型类型选择合适的forward方式
+        if isinstance(model, PromptEnhancedModel):
+            original_prompt_training = model.enable_prompt_training
+            model.disable_prompt_learning()
+            try:
+                _, prototypes_output = model.projector(prototypes_augmented)
+            finally:
+                if original_prompt_training:
+                    model.enable_prompt_learning()
+        else:
+            _, prototypes_output = model.projector(prototypes_augmented)
+
+        # 原始的proto aug loss
         proto_aug_loss = nn.CrossEntropyLoss()(prototypes_output / 0.1, prototypes_labels)
 
-        return proto_aug_loss
+        # 添加spacing loss
+        spacing_loss = self.compute_spacing_loss()
+
+        # 组合损失
+        total_loss = proto_aug_loss + self.spacing_weight * spacing_loss
+
+        return total_loss
 
     def update_prototypes_offline(self, model, train_loader, num_labeled_classes):
+        """在离线阶段更新prototypes，并计算等距点"""
         model.eval()
 
         all_feats_list = []
         all_labels_list = []
-        # forward data
-        for batch_idx, (images, label, _) in enumerate(tqdm(train_loader)):   # NOTE!!!
-            images = images.cuda(non_blocking=True)
-            with torch.no_grad():
-                feats = model[0](images)   # backbone
-                feats = torch.nn.functional.normalize(feats, dim=-1)
-                all_feats_list.append(feats)
-                all_labels_list.append(label)
+
+        original_prompt_training = False
+        if isinstance(model, PromptEnhancedModel):
+            original_prompt_training = model.enable_prompt_training
+            model.disable_prompt_learning()
+
+        try:
+            for batch_idx, (images, label, _) in enumerate(
+                    tqdm(train_loader, desc="Extracting features for prototypes")):
+                images = images.cuda(non_blocking=True)
+                with torch.no_grad():
+                    feats = model.backbone(images)
+                    feats = torch.nn.functional.normalize(feats, dim=-1)
+                    all_feats_list.append(feats)
+                    all_labels_list.append(label)
+        finally:
+            if isinstance(model, PromptEnhancedModel) and original_prompt_training:
+                model.enable_prompt_learning()
+
         all_feats = torch.cat(all_feats_list, dim=0)
         all_labels = torch.cat(all_labels_list, dim=0)
 
-        # compute prototypes and radius
+        # 计算prototypes和radius
         prototypes_list = []
         radius_list = []
         for c in range(num_labeled_classes):
-            feats_c = all_feats[all_labels==c]
+            feats_c = all_feats[all_labels == c]
             feats_c_mean = torch.mean(feats_c, dim=0)
             prototypes_list.append(feats_c_mean)
-            feats_c_center = feats_c - feats_c_mean # 特征向量减去原型（中心化）
-            cov = torch.matmul(feats_c_center.t(), feats_c_center) / len(feats_c_center) # 计算协方差矩阵
-            radius = torch.trace(cov) / self.feature_dim   # or feats_c_center.shape[1] 协方差矩阵的平均特征值
+            feats_c_center = feats_c - feats_c_mean
+            cov = torch.matmul(feats_c_center.t(), feats_c_center) / len(feats_c_center)
+            radius = torch.trace(cov) / self.feature_dim
             radius_list.append(radius)
+
         avg_radius = torch.sqrt(torch.mean(torch.stack(radius_list)))
         prototypes_all = torch.stack(prototypes_list, dim=0)
         prototypes_all = F.normalize(prototypes_all, dim=-1, p=2)
 
-        """
-        radius 衡量该类样本在特征空间中的分散程度;
-        """
-        # update
+        # 更新状态
         self.radius = avg_radius
         self.prototypes = prototypes_all
 
-        # update mean similarity for each prototype
+        # 更新mean similarity
         similarity = prototypes_all @ prototypes_all.T
         for i in range(len(similarity)):
-            similarity[i,i] -= similarity[i,i]
-        mean_similarity = torch.sum(similarity, dim=-1) / (len(similarity)-1)
-
-        """
-        每个原型（prototype）与其他所有原型之间的平均相似度
-        """
+            similarity[i, i] -= similarity[i, i]
+        mean_similarity = torch.sum(similarity, dim=-1) / (len(similarity) - 1)
         self.mean_similarity = mean_similarity
 
+        # 计算等距点
+        self.equidistant_points = self.compute_equidistant_points()
+
+        self.logger.info(f"Updated prototypes: {len(prototypes_list)} classes, radius: {avg_radius:.4f}")
+        if self.equidistant_points is not None:
+            self.logger.info(f"Computed equidistant points with spacing_alpha: {self.spacing_alpha}")
+
     def update_prototypes_online(self, model, train_loader, num_seen_classes, num_all_classes):
+        """在线阶段更新prototypes，并重新计算等距点"""
         model.eval()
 
         all_preds_list = []
         all_feats_list = []
-        # forward data
-        for batch_idx, (images, label, _, _) in enumerate(tqdm(train_loader)):   # NOTE!!!
+
+        for batch_idx, (images, label, _, _) in enumerate(tqdm(train_loader, desc="Updating online prototypes")):
             images = images.cuda(non_blocking=True)
             with torch.no_grad():
                 _, logits = model(images)
-                feats = model[0](images)   # backbone
+                model.disable_prompt_learning()
+                feats = model.backbone(images)
                 feats = torch.nn.functional.normalize(feats, dim=-1)
                 all_feats_list.append(feats)
                 all_preds_list.append(logits.argmax(1))
+
         all_feats = torch.cat(all_feats_list, dim=0)
         all_preds = torch.cat(all_preds_list, dim=0)
 
-        # compute prototypes
+        # 计算新类别的prototypes
         prototypes_list = []
         for c in range(num_seen_classes, num_all_classes):
-            feats_c = all_feats[all_preds==c]
+            feats_c = all_feats[all_preds == c]
             if len(feats_c) == 0:
-                self.logger.info('No pred of this class, using fc (last_layer) parameters...')
-                feats_c_mean = model[1].last_layer.weight_v.data[c]
+                self.logger.info(f'No pred of class {c}, using fc parameters...')
+                feats_c_mean = model.projector.last_layer.weight_v.data[c]
             else:
-                self.logger.info('computing (predicted) class-wise mean...')
+                self.logger.info(f'Computing class-wise mean for class {c}...')
                 feats_c_mean = torch.mean(feats_c, dim=0)
             prototypes_list.append(feats_c_mean)
-        prototypes_cur = torch.stack(prototypes_list, dim=0)   # NOTE!!!
+
+        prototypes_cur = torch.stack(prototypes_list, dim=0)
         prototypes_all = torch.cat([self.prototypes, prototypes_cur], dim=0)
         prototypes_all = F.normalize(prototypes_all, dim=-1, p=2)
 
-        # update
+        # 更新状态
         self.prototypes = prototypes_all
 
-        # update mean similarity for each prototype
+        # 更新mean similarity
         similarity = prototypes_all @ prototypes_all.T
         for i in range(len(similarity)):
-            similarity[i,i] -= similarity[i,i]
-        mean_similarity = torch.sum(similarity, dim=-1) / (len(similarity)-1)
-
+            similarity[i, i] -= similarity[i, i]
+        mean_similarity = torch.sum(similarity, dim=-1) / (len(similarity) - 1)
         self.mean_similarity = mean_similarity
+
+        # 重新计算等距点
+        self.equidistant_points = self.compute_equidistant_points()
+
+        self.logger.info(f"Updated prototypes: {len(prototypes_all)} classes total")
+        if self.equidistant_points is not None:
+            self.logger.info(f"Recomputed equidistant points for {len(prototypes_all)} classes")
