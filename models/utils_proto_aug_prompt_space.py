@@ -124,18 +124,9 @@ class ProtoAugSpacingManager:
                                                                 device=self.device) * self.radius * self.radius_scale
 
         # 根据模型类型选择合适的forward方式
-        if isinstance(model, PromptEnhancedModel):
-            original_prompt_training = model.enable_prompt_training
-            model.disable_prompt_learning()
-            try:
-                _, prototypes_output = model.projector(prototypes_augmented)
-            finally:
-                if original_prompt_training:
-                    model.enable_prompt_learning()
-        else:
-            _, prototypes_output = model.projector(prototypes_augmented)
+        enhanced_prototypes, _ = model.prompt_pool.forward(prototypes_augmented)
+        _, prototypes_output = model.projector(enhanced_prototypes)
 
-        # 原始的proto aug loss
         proto_aug_loss = nn.CrossEntropyLoss()(prototypes_output / 0.1, prototypes_labels)
 
         # 添加spacing loss
@@ -153,23 +144,17 @@ class ProtoAugSpacingManager:
         all_feats_list = []
         all_labels_list = []
 
-        original_prompt_training = False
-        if isinstance(model, PromptEnhancedModel):
-            original_prompt_training = model.enable_prompt_training
-            model.disable_prompt_learning()
+        model.enable_prompt_learning()
 
-        try:
-            for batch_idx, (images, label, _) in enumerate(
-                    tqdm(train_loader, desc="Extracting features for prototypes")):
-                images = images.cuda(non_blocking=True)
-                with torch.no_grad():
-                    feats = model.backbone(images)
-                    feats = torch.nn.functional.normalize(feats, dim=-1)
-                    all_feats_list.append(feats)
-                    all_labels_list.append(label)
-        finally:
-            if isinstance(model, PromptEnhancedModel) and original_prompt_training:
-                model.enable_prompt_learning()
+        # forward data
+        for batch_idx, (images, label, _) in enumerate(
+                tqdm(train_loader, desc="Extracting features for prototypes")):
+            images = images.cuda(non_blocking=True)
+            with torch.no_grad():
+                feats = model.backbone(images)  # 直接使用backbone
+                feats = torch.nn.functional.normalize(feats, dim=-1)
+                all_feats_list.append(feats)
+                all_labels_list.append(label)
 
         all_feats = torch.cat(all_feats_list, dim=0)
         all_labels = torch.cat(all_labels_list, dim=0)
@@ -211,6 +196,7 @@ class ProtoAugSpacingManager:
     def update_prototypes_online(self, model, train_loader, num_seen_classes, num_all_classes):
         """在线阶段更新prototypes，并重新计算等距点"""
         model.eval()
+        model.enable_prompt_learning()
 
         all_preds_list = []
         all_feats_list = []
@@ -219,7 +205,6 @@ class ProtoAugSpacingManager:
             images = images.cuda(non_blocking=True)
             with torch.no_grad():
                 _, logits = model(images)
-                model.disable_prompt_learning()
                 feats = model.backbone(images)
                 feats = torch.nn.functional.normalize(feats, dim=-1)
                 all_feats_list.append(feats)

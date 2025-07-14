@@ -62,7 +62,7 @@ class ProtoAugManager:
     # 在每个在线阶段(Online Session)中，使用上一阶段保存的原型和难度分布进行采样
 
     def compute_proto_aug_hardness_aware_loss(self, model):
-        prototypes = F.normalize(self.prototypes, dim=-1, p=2).to(self.device)
+        prototypes = F.normalize(self.prototypes, dim=-1, p=2).to(self.device) # shape: (num_seen_classes, feature_dim) （50，768）
 
         # hardness-aware sampling
         # 通过hardness-aware sampling机制，使用 sampling_prob 来控制采样概率
@@ -70,11 +70,11 @@ class ProtoAugManager:
         sampling_prob = F.softmax(self.mean_similarity / self.hardness_temp, dim=-1)
         sampling_prob = sampling_prob.cpu().numpy()
         # prototypes_labels = [5,5,6,7,9,11...] (范围是Session t-1的原型个数,即 Seen 的类别数)
-        prototypes_labels = np.random.choice(len(prototypes), size=(self.batch_size,), replace=True, p=sampling_prob)
+        prototypes_labels = np.random.choice(len(prototypes), size=(self.batch_size,), replace=True, p=sampling_prob) # shape: (batch_size*2,) (256,)
 
         prototypes_labels = torch.from_numpy(prototypes_labels).long().to(self.device)
 
-        prototypes_sampled = prototypes[prototypes_labels]
+        prototypes_sampled = prototypes[prototypes_labels] # shape: (batch_size, feature_dim) (256, 768)
         """
         参考ProtoAug论文
         prototypes_sampled 是一个原型矩阵(batch_size,feature_dim)
@@ -84,6 +84,7 @@ class ProtoAugManager:
         # 从分布中采样
         # prototypes_augmented 包含了 batch_size 个样本
         prototypes_augmented = prototypes_sampled + torch.randn((self.batch_size, self.feature_dim), device=self.device) * self.radius * self.radius_scale
+        print("prototypes_augmented.shape",prototypes_augmented.shape)
         # prototypes_augmented = F.normalize(prototypes_augmented, dim=-1, p=2) # NOTE!!! DO NOT normalize
         # forward prototypes and get logits
         _, prototypes_output = model[1](prototypes_augmented)
@@ -113,7 +114,7 @@ class ProtoAugManager:
         radius_list = []
         for c in range(num_labeled_classes):
             feats_c = all_feats[all_labels==c]
-            feats_c_mean = torch.mean(feats_c, dim=0)
+            feats_c_mean = torch.mean(feats_c, dim=0) # feats_c_mean.shape: (768,)
             prototypes_list.append(feats_c_mean)
             feats_c_center = feats_c - feats_c_mean # 特征向量减去原型（中心化）
             cov = torch.matmul(feats_c_center.t(), feats_c_center) / len(feats_c_center) # 计算协方差矩阵
@@ -121,7 +122,7 @@ class ProtoAugManager:
             radius_list.append(radius)
         avg_radius = torch.sqrt(torch.mean(torch.stack(radius_list)))
         prototypes_all = torch.stack(prototypes_list, dim=0)
-        prototypes_all = F.normalize(prototypes_all, dim=-1, p=2)
+        prototypes_all = F.normalize(prototypes_all, dim=-1, p=2) # shape: (num_labeled_classes, feature_dim) (50, 768)
 
         """
         radius 衡量该类样本在特征空间中的分散程度;
@@ -164,14 +165,14 @@ class ProtoAugManager:
             feats_c = all_feats[all_preds==c]
             if len(feats_c) == 0:
                 self.logger.info('No pred of this class, using fc (last_layer) parameters...')
-                feats_c_mean = model[1].last_layer.weight_v.data[c]
+                feats_c_mean = model[1].last_layer.weight_v.data[c] # 用原型分类器的权重（用K-means初始化的那个原型）替换簇中心（求平均值得到的原型）
             else:
                 self.logger.info('computing (predicted) class-wise mean...')
                 feats_c_mean = torch.mean(feats_c, dim=0)
             prototypes_list.append(feats_c_mean)
         prototypes_cur = torch.stack(prototypes_list, dim=0)   # NOTE!!!
         prototypes_all = torch.cat([self.prototypes, prototypes_cur], dim=0)
-        prototypes_all = F.normalize(prototypes_all, dim=-1, p=2)
+        prototypes_all = F.normalize(prototypes_all, dim=-1, p=2) # shape: (num_seen_classes+num_new_classes, feature_dim) (50+10, 768)
 
         # update
         self.prototypes = prototypes_all

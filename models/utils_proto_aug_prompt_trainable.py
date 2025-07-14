@@ -68,27 +68,8 @@ class ProtoAugManager:
                                                                 device=self.device) * self.radius * self.radius_scale
 
         # 根据模型类型选择合适的forward方式
-        if isinstance(model, PromptEnhancedModel):
-            # 对于PromptEnhancedModel，我们需要处理prompt增强
-            # 在计算proto_aug_loss时，我们可能希望使用原始特征（不使用prompt增强）
-            # 或者我们可以让prototype也受益于prompt增强
-
-            # 选项1：禁用prompt增强来计算prototype loss
-            original_prompt_training = model.enable_prompt_training
-            model.disable_prompt_learning()
-            try:
-                _, prototypes_output = model.projector(prototypes_augmented)
-            finally:
-                if original_prompt_training:
-                    model.enable_prompt_learning()
-
-            # 选项2：使用prompt增强的prototype（注释掉上面的代码，启用下面的代码）
-            # enhanced_prototypes = model.prompt_pool.forward(prototypes_augmented) if model.prompt_pool is not None else prototypes_augmented
-            # _, prototypes_output = model.projector(enhanced_prototypes)
-
-        else:
-            # 兼容原始的Sequential模型结构
-            _, prototypes_output = model.projector(prototypes_augmented)
+        enhanced_prototypes, _ = model.prompt_pool.forward(prototypes_augmented)
+        _, prototypes_output = model.projector(enhanced_prototypes)
 
         proto_aug_loss = nn.CrossEntropyLoss()(prototypes_output / 0.1, prototypes_labels)
 
@@ -109,25 +90,17 @@ class ProtoAugManager:
         all_labels_list = []
 
         # 在特征提取时禁用prompt增强，确保使用原始backbone特征
-        original_prompt_training = False
-        if isinstance(model, PromptEnhancedModel):
-            original_prompt_training = model.enable_prompt_training
-            model.disable_prompt_learning()
+        model.enable_prompt_learning()
 
-        try:
-            # forward data
-            for batch_idx, (images, label, _) in enumerate(
-                    tqdm(train_loader, desc="Extracting features for prototypes")):
-                images = images.cuda(non_blocking=True)
-                with torch.no_grad():
-                    feats = model.backbone(images)  # 直接使用backbone
-                    feats = torch.nn.functional.normalize(feats, dim=-1)
-                    all_feats_list.append(feats)
-                    all_labels_list.append(label)
-        finally:
-            # 恢复原始prompt训练设置
-            if isinstance(model, PromptEnhancedModel) and original_prompt_training:
-                model.enable_prompt_learning()
+        # forward data
+        for batch_idx, (images, label, _) in enumerate(
+                tqdm(train_loader, desc="Extracting features for prototypes")):
+            images = images.cuda(non_blocking=True)
+            with torch.no_grad():
+                feats = model.backbone(images)  # 直接使用backbone
+                feats = torch.nn.functional.normalize(feats, dim=-1)
+                all_feats_list.append(feats)
+                all_labels_list.append(label)
 
         all_feats = torch.cat(all_feats_list, dim=0)
         all_labels = torch.cat(all_labels_list, dim=0)
@@ -171,6 +144,7 @@ class ProtoAugManager:
             num_all_classes: 总类别数量
         """
         model.eval()
+        model.enable_prompt_learning()
 
         all_preds_list = []
         all_feats_list = []
@@ -180,8 +154,6 @@ class ProtoAugManager:
             images = images.cuda(non_blocking=True)
             with torch.no_grad():
                 _, logits = model(images)
-                # 但提取原始backbone特征用于计算prototype
-                model.disable_prompt_learning()
                 feats = model.backbone(images)
                 feats = torch.nn.functional.normalize(feats, dim=-1)
                 all_feats_list.append(feats)
