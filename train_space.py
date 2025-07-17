@@ -423,9 +423,11 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             class_labels, mask_lab = class_labels.cuda(non_blocking=True), mask_lab.cuda(non_blocking=True).bool()
             images = torch.cat(images, dim=0).cuda(non_blocking=True)
 
+            feats = student.backbone(images)
+            feats = torch.nn.functional.normalize(feats, dim=-1)
+
             # 使用改进的forward方法
-            student_proj, student_out, prompt_losses, original_logits = student.forward_with_prompt_loss(images,
-                                                                                                         class_labels)
+            student_proj, student_out, prompt_losses, original_logits = student.forward_with_prompt_loss(images, class_labels)
             teacher_out = student_out.detach()
 
             # ========== 主任务损失计算 ==========
@@ -464,20 +466,21 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             contrastive_loss = torch.nn.CrossEntropyLoss()(contrastive_logits, contrastive_labels)
 
             # ProtoAug损失
+            spacing_loss, _ = proto_aug_manager.compute_spacing_loss(feats, model=student)
             proto_aug_loss = proto_aug_manager.compute_proto_aug_hardness_aware_loss(student)
 
             # 特征蒸馏
-            feats = student.backbone(images)
-            feats = torch.nn.functional.normalize(feats, dim=-1)
             with torch.no_grad():
                 feats_pre = student_pre.backbone(images)
                 feats_pre = torch.nn.functional.normalize(feats_pre, dim=-1)
 
             feat_distill_loss = (feats - feats_pre).pow(2).sum() / len(feats)
 
+
+
             # 主任务损失
             main_loss = 1 * cluster_loss + 1 * contrastive_loss
-            main_loss += args.proto_aug_weight * proto_aug_loss + args.feat_distill_weight * feat_distill_loss
+            main_loss += args.proto_aug_weight * proto_aug_loss + args.feat_distill_weight * feat_distill_loss + spacing_loss
 
             # ========== Prompt损失计算 ==========
             # 在线阶段更积极地训练prompt

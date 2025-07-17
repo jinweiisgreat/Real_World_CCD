@@ -14,7 +14,7 @@ from models.prompt_enhanced_model import PromptEnhancedModel
 
 class ProtoAugSpacingManager:
     def __init__(self, feature_dim, batch_size, hardness_temp, radius_scale, device, logger,
-                 spacing_alpha=1.2, spacing_weight=1.0):
+                 spacing_alpha=1.2, spacing_weight=1.0, spacing_momentum=0.1):
         self.feature_dim = feature_dim
         self.batch_size = batch_size
         self.device = device
@@ -28,50 +28,58 @@ class ProtoAugSpacingManager:
         # Spacing Loss 相关参数
         self.spacing_alpha = spacing_alpha  # 距离放大因子
         self.spacing_weight = spacing_weight  # spacing loss权重
+        self.spacing_momentum = spacing_momentum
         self.equidistant_points = None  # 等距点缓存
 
+        # 用于跟踪每个类别的访问频率（spacing loss论文中的v）
+        self.class_visit_counts = None
+
     def save_proto_aug_dict(self, save_path):
+        """保存所有状态"""
         proto_aug_dict = {
             'prototypes': self.prototypes,
             'radius': self.radius,
             'mean_similarity': self.mean_similarity,
             'equidistant_points': self.equidistant_points,
             'spacing_alpha': self.spacing_alpha,
+            'class_visit_counts': self.class_visit_counts,
         }
         torch.save(proto_aug_dict, save_path)
 
     def load_proto_aug_dict(self, load_path):
+        """加载所有状态"""
         proto_aug_dict = torch.load(load_path)
         self.prototypes = proto_aug_dict['prototypes']
         self.radius = proto_aug_dict['radius']
         self.mean_similarity = proto_aug_dict['mean_similarity']
         self.equidistant_points = proto_aug_dict.get('equidistant_points', None)
         self.spacing_alpha = proto_aug_dict.get('spacing_alpha', 1.2)
+        self.class_visit_counts = proto_aug_dict.get('class_visit_counts', None)
 
     def compute_equidistant_points(self):
-        """计算等距点，只在prototypes更新时调用"""
+        """计算等距点，使用论文中的方法"""
         if self.prototypes is None or len(self.prototypes) < 2:
             return None
 
-        prototypes = F.normalize(self.prototypes, dim=-1, p=2)
+        prototypes = F.normalize(self.prototypes, dim=-1, p=2).to(self.device)
         num_classes = len(prototypes)
 
-        # 计算最大距离
+        # 计算最大距离 (论文中的pdist)
         distances = torch.cdist(prototypes, prototypes)
         max_distance = distances.max().item()
         target_distance = self.spacing_alpha * max_distance
 
-        # 构建目标距离矩阵
+        # 构建目标距离矩阵Δ
         target_distances = torch.full((num_classes, num_classes), target_distance, device=self.device)
         target_distances.fill_diagonal_(0)
 
-        # 简化的等距点计算：使用MDS的近似方法
+        # 使用简化的MDS计算等距点
         equidistant_points = self._approximate_mds(target_distances, prototypes)
 
         return equidistant_points
 
     def _approximate_mds(self, target_distances, initial_points):
-        """简化的多维标定，迭代优化"""
+        """简化的MDS实现"""
         points = initial_points.clone()
         num_classes = len(points)
 
@@ -79,7 +87,6 @@ class ProtoAugSpacingManager:
         for _ in range(10):  # 限制迭代次数
             current_distances = torch.cdist(points, points)
 
-            # 计算梯度方向（简化版）
             for i in range(num_classes):
                 for j in range(i + 1, num_classes):
                     current_dist = current_distances[i, j]
@@ -91,29 +98,155 @@ class ProtoAugSpacingManager:
                         points[i] += adjustment / 2
                         points[j] -= adjustment / 2
 
-            # 重新归一化
             points = F.normalize(points, dim=-1, p=2)
 
         return points
 
-    def compute_spacing_loss(self):
-        """计算spacing loss，直接使用缓存的等距点"""
-        if self.equidistant_points is None:
-            return torch.tensor(0.0, device=self.device)
+    def compute_spacing_loss(self, features, model=None):
+        """
+        按照论文Algorithm 2实现的Spacing Loss
 
+        Args:
+            features: 当前batch的特征 [batch_size, feature_dim]
+            model: 用于更新特征提取器的模型（可选）
+
+        Returns:
+            spacing_loss: spacing损失
+            assignment_info: 分配信息（用于调试）
+        """
+        if self.equidistant_points is None or self.prototypes is None:
+            return torch.tensor(0.0, device=self.device), None
+
+        batch_size = features.shape[0]
+        features_norm = F.normalize(features, dim=-1, p=2)
         prototypes_norm = F.normalize(self.prototypes, dim=-1, p=2)
-        spacing_loss = F.mse_loss(prototypes_norm, self.equidistant_points)
 
-        return spacing_loss
+        # Step 1: 动态分配 - 将每个特征分配给最近的原型 (Algorithm 2, Line 7)
+        # distances = torch.cdist(features_norm, prototypes_norm)  # [batch_size, num_prototypes]
+        # assignments = distances.argmin(dim=1)  # [batch_size]
+        # soft-assignment
+        similarity_matrix = features_norm @ prototypes_norm.T  # [batch_size, num_prototypes]
+        soft_assignments = F.softmax(similarity_matrix / 0.1, dim=1)  # [batch_size, num_prototypes]
+        hard_assignments = soft_assignments.argmax(dim=1)
+
+
+        # Step 2: 计算特征到原型的损失 (Algorithm 2, Line 8)
+        # assigned_prototypes = prototypes_norm[assignments]  # [batch_size, feature_dim]
+        # feature_to_prototype_loss = F.mse_loss(features_norm, assigned_prototypes)
+        # CELoss
+        feature_to_prototype_loss = nn.CrossEntropyLoss()(similarity_matrix / 0.1, hard_assignments)
+
+        # Step 3: 更新原型，向"特征+等距点"组合移动 (Algorithm 2, Line 15)
+        # prototype_update_loss = 0.0
+        updated_prototypes = prototypes_norm.clone()
+
+        # 初始化访问计数（如果还没有）
+        if self.class_visit_counts is None:
+            self.class_visit_counts = torch.zeros(len(self.prototypes), device=self.device)
+
+        unique_assignments = torch.unique(hard_assignments)
+        assignment_info = {}
+
+        '''
+        # hard_assignments
+        for class_idx in unique_assignments:
+            mask = (assignments == class_idx)
+            class_features = features_norm[mask]  # 属于该类的特征
+            num_samples = mask.sum().item()
+
+            if num_samples > 0:
+                # 更新访问计数 (Algorithm 2, Line 13)
+                self.class_visit_counts[class_idx] += num_samples
+
+                # 计算动量参数η (Algorithm 2, Line 14)
+                eta = self.spacing_momentum / (1 + self.class_visit_counts[class_idx] * 0.01)
+                eta = torch.clamp(eta, 0.01, 0.5)  # 限制η的范围
+
+                # 计算目标：当前特征均值 + 对应等距点 (Algorithm 2, Line 15)
+                class_features_mean = class_features.mean(dim=0)
+                equidistant_point = self.equidistant_points[class_idx]
+                target_combination = class_features_mean + equidistant_point
+
+                # 原型更新：向目标组合移动
+                current_prototype = prototypes_norm[class_idx]
+                target_prototype = (1 - eta) * current_prototype + eta * target_combination
+                target_prototype = F.normalize(target_prototype, dim=-1, p=2)
+
+                # 计算更新损失
+                # prototype_update_loss += F.mse_loss(current_prototype, target_prototype)
+
+                updated_prototypes[class_idx] = target_prototype
+
+                # 记录分配信息
+                assignment_info[class_idx.item()] = {
+                    'num_samples': num_samples,
+                    'eta': eta.item(),
+                    'visit_count': self.class_visit_counts[class_idx].item(),
+                    'avg_distance': distances[mask, class_idx].mean().item()
+                }
+        '''
+
+        # soft_assignments
+        for class_idx in unique_assignments:
+            # 使用软分配权重来更新原型
+            class_weights = soft_assignments[:, class_idx]  # [batch_size]
+
+            # 只考虑对该类有显著贡献的样本（权重大于阈值）
+            threshold = 0.1
+            significant_mask = class_weights > threshold
+
+            if significant_mask.sum() > 0:
+                class_features = features_norm[significant_mask]  # 对该类有贡献的特征
+                class_weights_filtered = class_weights[significant_mask]  # 对应的权重
+
+                # 更新访问计数 - 使用加权计数
+                weighted_count = class_weights_filtered.sum().item()
+                self.class_visit_counts[class_idx] += weighted_count
+
+                # 计算动量参数η (Algorithm 2, Line 14)
+                eta = self.spacing_momentum / (1 + self.class_visit_counts[class_idx] * 0.01)
+                eta = torch.clamp(eta, 0.01, 0.5)  # 限制η的范围
+
+                # 计算加权特征均值
+                class_weights_normalized = class_weights_filtered / class_weights_filtered.sum()
+                class_features_mean = (class_features * class_weights_normalized.unsqueeze(1)).sum(dim=0)
+
+                # 计算目标：当前特征均值 + 对应等距点 (Algorithm 2, Line 15)
+                equidistant_point = self.equidistant_points[class_idx]
+                target_combination = class_features_mean + equidistant_point
+
+                # 原型更新：向目标组合移动
+                current_prototype = prototypes_norm[class_idx]
+                target_prototype = (1 - eta) * current_prototype + eta * target_combination
+                target_prototype = F.normalize(target_prototype, dim=-1, p=2)
+
+                updated_prototypes[class_idx] = target_prototype
+
+                # 记录分配信息
+                assignment_info[class_idx.item()] = {
+                    'num_samples': significant_mask.sum().item(),
+                    'weighted_count': weighted_count,
+                    'eta': eta.item(),
+                    'visit_count': self.class_visit_counts[class_idx].item(),
+                    'avg_similarity': similarity_matrix[significant_mask, class_idx].mean().item(),
+                    'max_soft_weight': class_weights_filtered.max().item()
+                }
+        # 更新存储的原型
+        with torch.no_grad():
+            self.prototypes = F.normalize(updated_prototypes, dim=-1, p=2)
+
+        return feature_to_prototype_loss, assignment_info
 
     def compute_proto_aug_hardness_aware_loss(self, model):
-        """计算综合的prototype augmentation损失，包含spacing loss"""
+        """
+        结合原有的prototype augmentation和新的spacing loss
+        """
         if self.prototypes is None:
             return torch.tensor(0.0, device=self.device)
 
         prototypes = F.normalize(self.prototypes, dim=-1, p=2).to(self.device)
 
-        # 原始的hardness-aware sampling
+        # 原有的hardness-aware sampling
         sampling_prob = F.softmax(self.mean_similarity / self.hardness_temp, dim=-1)
         sampling_prob = sampling_prob.cpu().numpy()
         prototypes_labels = np.random.choice(len(prototypes), size=(self.batch_size,), replace=True, p=sampling_prob)
@@ -123,35 +256,29 @@ class ProtoAugSpacingManager:
         prototypes_augmented = prototypes_sampled + torch.randn((self.batch_size, self.feature_dim),
                                                                 device=self.device) * self.radius * self.radius_scale
 
-        # 根据模型类型选择合适的forward方式
-        enhanced_prototypes, _ = model.prompt_pool.forward(prototypes_augmented)
-        _, prototypes_output = model.projector(enhanced_prototypes)
+        # 通过模型获得增强原型的输出
+        if isinstance(model, PromptEnhancedModel):
+            enhanced_prototypes, _ = model.prompt_pool.forward(prototypes_augmented)
+            _, prototypes_output = model.projector(enhanced_prototypes)
+        else:
+            _, prototypes_output = model.projector(prototypes_augmented)
 
         proto_aug_loss = nn.CrossEntropyLoss()(prototypes_output / 0.1, prototypes_labels)
 
-        # 添加spacing loss
-        spacing_loss = self.compute_spacing_loss()
-
-        # 组合损失
-        total_loss = proto_aug_loss + self.spacing_weight * spacing_loss
-
-        return total_loss
+        return proto_aug_loss
 
     def update_prototypes_offline(self, model, train_loader, num_labeled_classes):
-        """在离线阶段更新prototypes，并计算等距点"""
+        """离线阶段更新prototypes并初始化等距点"""
         model.eval()
-
         all_feats_list = []
         all_labels_list = []
 
-        model.enable_prompt_learning()
-
-        # forward data
-        for batch_idx, (images, label, _) in enumerate(
-                tqdm(train_loader, desc="Extracting features for prototypes")):
-            images = images.cuda(non_blocking=True)
-            with torch.no_grad():
-                feats = model.backbone(images)  # 直接使用backbone
+        # 提取特征
+        with torch.no_grad():
+            for batch_idx, (images, label, _) in enumerate(
+                    tqdm(train_loader, desc="Extracting features for prototypes")):
+                images = images.cuda(non_blocking=True)
+                feats = model.backbone(images)
                 feats = torch.nn.functional.normalize(feats, dim=-1)
                 all_feats_list.append(feats)
                 all_labels_list.append(label)
@@ -179,6 +306,9 @@ class ProtoAugSpacingManager:
         self.radius = avg_radius
         self.prototypes = prototypes_all
 
+        # 计算等距点
+        self.equidistant_points = self.compute_equidistant_points()
+
         # 更新mean similarity
         similarity = prototypes_all @ prototypes_all.T
         for i in range(len(similarity)):
@@ -186,24 +316,22 @@ class ProtoAugSpacingManager:
         mean_similarity = torch.sum(similarity, dim=-1) / (len(similarity) - 1)
         self.mean_similarity = mean_similarity
 
-        # 计算等距点
-        self.equidistant_points = self.compute_equidistant_points()
+        # 初始化访问计数
+        self.class_visit_counts = torch.zeros(num_labeled_classes, device=self.device)
 
-        self.logger.info(f"Updated prototypes: {len(prototypes_list)} classes, radius: {avg_radius:.4f}")
+        self.logger.info(f"Offline: Updated prototypes for {len(prototypes_list)} classes")
         if self.equidistant_points is not None:
             self.logger.info(f"Computed equidistant points with spacing_alpha: {self.spacing_alpha}")
 
     def update_prototypes_online(self, model, train_loader, num_seen_classes, num_all_classes):
-        """在线阶段更新prototypes，并重新计算等距点"""
+        """在线阶段更新prototypes"""
         model.eval()
-        model.enable_prompt_learning()
-
         all_preds_list = []
         all_feats_list = []
 
-        for batch_idx, (images, label, _, _) in enumerate(tqdm(train_loader, desc="Updating online prototypes")):
-            images = images.cuda(non_blocking=True)
-            with torch.no_grad():
+        with torch.no_grad():
+            for batch_idx, (images, label, _, _) in enumerate(tqdm(train_loader, desc="Updating online prototypes")):
+                images = images.cuda(non_blocking=True)
                 _, logits = model(images)
                 feats = model.backbone(images)
                 feats = torch.nn.functional.normalize(feats, dim=-1)
@@ -232,6 +360,9 @@ class ProtoAugSpacingManager:
         # 更新状态
         self.prototypes = prototypes_all
 
+        # 重新计算等距点
+        self.equidistant_points = self.compute_equidistant_points()
+
         # 更新mean similarity
         similarity = prototypes_all @ prototypes_all.T
         for i in range(len(similarity)):
@@ -239,9 +370,10 @@ class ProtoAugSpacingManager:
         mean_similarity = torch.sum(similarity, dim=-1) / (len(similarity) - 1)
         self.mean_similarity = mean_similarity
 
-        # 重新计算等距点
-        self.equidistant_points = self.compute_equidistant_points()
+        # 扩展访问计数
+        new_counts = torch.zeros(len(prototypes_cur), device=self.device)
+        self.class_visit_counts = torch.cat([self.class_visit_counts, new_counts])
 
-        self.logger.info(f"Updated prototypes: {len(prototypes_all)} classes total")
+        self.logger.info(f"Online: Updated prototypes to {len(prototypes_all)} classes total")
         if self.equidistant_points is not None:
             self.logger.info(f"Recomputed equidistant points for {len(prototypes_all)} classes")
