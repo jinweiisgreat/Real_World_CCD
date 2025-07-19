@@ -14,7 +14,7 @@ from models.prompt_enhanced_model import PromptEnhancedModel
 
 class ProtoAugSpacingManager:
     def __init__(self, feature_dim, batch_size, hardness_temp, radius_scale, device, logger,
-                 spacing_alpha=1.2, spacing_weight=1.0, spacing_momentum=0.1):
+                 spacing_alpha=1.5, spacing_weight=1.0, spacing_momentum=0.1):
         self.feature_dim = feature_dim
         self.batch_size = batch_size
         self.device = device
@@ -53,7 +53,7 @@ class ProtoAugSpacingManager:
         self.radius = proto_aug_dict['radius']
         self.mean_similarity = proto_aug_dict['mean_similarity']
         self.equidistant_points = proto_aug_dict.get('equidistant_points', None)
-        self.spacing_alpha = proto_aug_dict.get('spacing_alpha', 1.2)
+        self.spacing_alpha = proto_aug_dict.get('spacing_alpha', 1.5)
         self.class_visit_counts = proto_aug_dict.get('class_visit_counts', None)
 
     def compute_equidistant_points(self):
@@ -122,19 +122,19 @@ class ProtoAugSpacingManager:
         prototypes_norm = F.normalize(self.prototypes, dim=-1, p=2)
 
         # Step 1: 动态分配 - 将每个特征分配给最近的原型 (Algorithm 2, Line 7)
-        # distances = torch.cdist(features_norm, prototypes_norm)  # [batch_size, num_prototypes]
-        # assignments = distances.argmin(dim=1)  # [batch_size]
+        distances = torch.cdist(features_norm, prototypes_norm)  # [batch_size, num_prototypes]
+        assignments = distances.argmin(dim=1)  # [batch_size]
         # soft-assignment
-        similarity_matrix = features_norm @ prototypes_norm.T  # [batch_size, num_prototypes]
-        soft_assignments = F.softmax(similarity_matrix / 0.1, dim=1)  # [batch_size, num_prototypes]
-        hard_assignments = soft_assignments.argmax(dim=1)
+        # similarity_matrix = features_norm @ prototypes_norm.T  # [batch_size, num_prototypes]
+        # soft_assignments = F.softmax(similarity_matrix / 0.1, dim=1)  # [batch_size, num_prototypes]
+        # hard_assignments = soft_assignments.argmax(dim=1)
 
 
         # Step 2: 计算特征到原型的损失 (Algorithm 2, Line 8)
-        # assigned_prototypes = prototypes_norm[assignments]  # [batch_size, feature_dim]
-        # feature_to_prototype_loss = F.mse_loss(features_norm, assigned_prototypes)
+        assigned_prototypes = prototypes_norm[assignments]  # [batch_size, feature_dim]
+        feature_to_prototype_loss = F.mse_loss(features_norm, assigned_prototypes)
         # CELoss
-        feature_to_prototype_loss = nn.CrossEntropyLoss()(similarity_matrix / 0.1, hard_assignments)
+        # feature_to_prototype_loss = nn.CrossEntropyLoss()(similarity_matrix / 0.1, hard_assignments)
 
         # Step 3: 更新原型，向"特征+等距点"组合移动 (Algorithm 2, Line 15)
         # prototype_update_loss = 0.0
@@ -144,10 +144,9 @@ class ProtoAugSpacingManager:
         if self.class_visit_counts is None:
             self.class_visit_counts = torch.zeros(len(self.prototypes), device=self.device)
 
-        unique_assignments = torch.unique(hard_assignments)
+        unique_assignments = torch.unique(assignments) # 如果是soft_assignment，这里写 hard_assignments
         assignment_info = {}
 
-        '''
         # hard_assignments
         for class_idx in unique_assignments:
             mask = (assignments == class_idx)
@@ -184,9 +183,9 @@ class ProtoAugSpacingManager:
                     'visit_count': self.class_visit_counts[class_idx].item(),
                     'avg_distance': distances[mask, class_idx].mean().item()
                 }
-        '''
 
         # soft_assignments
+        '''
         for class_idx in unique_assignments:
             # 使用软分配权重来更新原型
             class_weights = soft_assignments[:, class_idx]  # [batch_size]
@@ -231,6 +230,8 @@ class ProtoAugSpacingManager:
                     'avg_similarity': similarity_matrix[significant_mask, class_idx].mean().item(),
                     'max_soft_weight': class_weights_filtered.max().item()
                 }
+        '''
+
         # 更新存储的原型
         with torch.no_grad():
             self.prototypes = F.normalize(updated_prototypes, dim=-1, p=2)

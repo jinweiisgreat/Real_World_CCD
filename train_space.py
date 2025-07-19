@@ -503,9 +503,9 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             main_loss_record.update(main_loss.item(), class_labels.size(0))
 
             if batch_idx % args.print_freq == 0:
-                args.logger.info('Epoch: [{}][{}/{}]\t Total Loss: {:.5f}\t Main Loss: {:.5f}\t Prompt Loss: {:.5f}'
+                args.logger.info('Epoch: [{}][{}/{}]\t Total Loss: {:.5f}\t Main Loss: {:.5f}\t Prompt Loss: {:.5f}\t Spacing Loss: {:.5f}'
                                  .format(epoch, batch_idx, len(train_loader), total_loss.item(),
-                                         main_loss.item(), total_prompt_loss.item()))
+                                         main_loss.item(), total_prompt_loss.item(),spacing_loss.item()))
 
                 # 输出预测比例信息
                 new_true_ratio = len(class_labels[class_labels >= args.num_seen_classes]) / len(class_labels)
@@ -887,6 +887,9 @@ if __name__ == "__main__":
     parser.add_argument('--prompt_pool', action='store_true', default=True,
                         help='Use prompt pool for feature enhancement')
 
+    ''' spacing loss parameters '''
+    parser.add_argument('--spacing_alpha', type=float, default=1.5,help='Max distance scaling factor')
+
     # ----------------------
     # INIT
     # ----------------------
@@ -1052,7 +1055,7 @@ if __name__ == "__main__":
         初始化一个ProtoAugSpacingManager实例
         '''
         proto_aug_manager = ProtoAugSpacingManager(args.feat_dim, args.n_views * args.batch_size, args.hardness_temp,
-                                            args.radius_scale, device, args.logger,spacing_alpha=1.2, spacing_weight=1.0)
+                                            args.radius_scale, device, args.logger,spacing_alpha=args.spacing_alpha, spacing_weight=1.0)
 
         # best test acc list across continual sessions
         args.best_test_acc_all_list = []
