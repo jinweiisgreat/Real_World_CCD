@@ -888,7 +888,7 @@ if __name__ == "__main__":
                         help='Use prompt pool for feature enhancement')
 
     ''' spacing loss parameters '''
-    parser.add_argument('--spacing_alpha', type=float, default=1.5,help='Max distance scaling factor')
+    parser.add_argument('--spacing_alpha', type=float, default=1.2,help='Max distance scaling factor')
 
     # ----------------------
     # INIT
@@ -1055,7 +1055,7 @@ if __name__ == "__main__":
         初始化一个ProtoAugSpacingManager实例
         '''
         proto_aug_manager = ProtoAugSpacingManager(args.feat_dim, args.n_views * args.batch_size, args.hardness_temp,
-                                            args.radius_scale, device, args.logger,spacing_alpha=args.spacing_alpha, spacing_weight=1.0)
+                                            args.radius_scale, device, args.logger, args.spacing_alpha, spacing_weight=1.0)
 
         # best test acc list across continual sessions
         args.best_test_acc_all_list = []

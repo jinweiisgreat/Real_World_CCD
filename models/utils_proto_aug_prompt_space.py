@@ -14,7 +14,7 @@ from models.prompt_enhanced_model import PromptEnhancedModel
 
 class ProtoAugSpacingManager:
     def __init__(self, feature_dim, batch_size, hardness_temp, radius_scale, device, logger,
-                 spacing_alpha=1.5, spacing_weight=1.0, spacing_momentum=0.1):
+                 spacing_alpha = None, spacing_weight=1.0, spacing_momentum=1.0):
         self.feature_dim = feature_dim
         self.batch_size = batch_size
         self.device = device
@@ -53,7 +53,7 @@ class ProtoAugSpacingManager:
         self.radius = proto_aug_dict['radius']
         self.mean_similarity = proto_aug_dict['mean_similarity']
         self.equidistant_points = proto_aug_dict.get('equidistant_points', None)
-        self.spacing_alpha = proto_aug_dict.get('spacing_alpha', 1.5)
+        self.spacing_alpha = proto_aug_dict.get('spacing_alpha', 1.2)
         self.class_visit_counts = proto_aug_dict.get('class_visit_counts', None)
 
     def compute_equidistant_points(self):
@@ -117,27 +117,22 @@ class ProtoAugSpacingManager:
         if self.equidistant_points is None or self.prototypes is None:
             return torch.tensor(0.0, device=self.device), None
 
-        batch_size = features.shape[0]
         features_norm = F.normalize(features, dim=-1, p=2)
-        prototypes_norm = F.normalize(self.prototypes, dim=-1, p=2)
+        prototypes_norm = F.normalize(self.prototypes, dim=-1, p=2) # [num_prototypes, feature_dim]
 
         # Step 1: 动态分配 - 将每个特征分配给最近的原型 (Algorithm 2, Line 7)
         distances = torch.cdist(features_norm, prototypes_norm)  # [batch_size, num_prototypes]
         assignments = distances.argmin(dim=1)  # [batch_size]
-        # soft-assignment
-        # similarity_matrix = features_norm @ prototypes_norm.T  # [batch_size, num_prototypes]
-        # soft_assignments = F.softmax(similarity_matrix / 0.1, dim=1)  # [batch_size, num_prototypes]
-        # hard_assignments = soft_assignments.argmax(dim=1)
 
 
         # Step 2: 计算特征到原型的损失 (Algorithm 2, Line 8)
-        assigned_prototypes = prototypes_norm[assignments]  # [batch_size, feature_dim]
-        feature_to_prototype_loss = F.mse_loss(features_norm, assigned_prototypes)
+        # assigned_prototypes = prototypes_norm[assignments]  # [batch_size, feature_dim]
+        # feature_to_prototype_loss = F.mse_loss(features_norm, assigned_prototypes) # feature_norm/assigned_prototypes.shape: [256,768]
         # CELoss
-        # feature_to_prototype_loss = nn.CrossEntropyLoss()(similarity_matrix / 0.1, hard_assignments)
+        similarity_matrix = features_norm @ prototypes_norm.T
+        feature_to_prototype_loss = F.cross_entropy(similarity_matrix / 0.1, assignments)
 
         # Step 3: 更新原型，向"特征+等距点"组合移动 (Algorithm 2, Line 15)
-        # prototype_update_loss = 0.0
         updated_prototypes = prototypes_norm.clone()
 
         # 初始化访问计数（如果还没有）
@@ -158,30 +153,46 @@ class ProtoAugSpacingManager:
                 self.class_visit_counts[class_idx] += num_samples
 
                 # 计算动量参数η (Algorithm 2, Line 14)
-                eta = self.spacing_momentum / (1 + self.class_visit_counts[class_idx] * 0.01)
-                eta = torch.clamp(eta, 0.01, 0.5)  # 限制η的范围
+                # eta = self.spacing_momentum / (1 + self.class_visit_counts[class_idx] * 0.01)
+                eta = 1.0 / self.class_visit_counts[class_idx]
+                eta = torch.clamp(eta, 0.001, 0.5)  # 限制η的范围
 
-                # 计算目标：当前特征均值 + 对应等距点 (Algorithm 2, Line 15)
-                class_features_mean = class_features.mean(dim=0)
-                equidistant_point = self.equidistant_points[class_idx]
-                target_combination = class_features_mean + equidistant_point
+                # # 计算目标：当前特征均值 + 对应等距点 (Algorithm 2, Line 15)
+                #                 # class_features_mean = class_features.mean(dim=0)
+                #                 # equidistant_point = self.equidistant_points[class_idx]
+                #                 # target_combination = class_features_mean + equidistant_point
+                #                 #
+                #                 # # 原型更新：向目标组合移动
+                #                 # current_prototype = prototypes_norm[class_idx]
+                #                 # target_prototype = (1 - eta) * current_prototype + eta * target_combination
+                #                 # target_prototype = F.normalize(target_prototype, dim=-1, p=2)
+                #                 #
+                #                 # # 计算更新损失
+                #                 # # prototype_update_loss += F.mse_loss(current_prototype, target_prototype)
+                #                 #
+                #                 # updated_prototypes[class_idx] = target_prototype
 
-                # 原型更新：向目标组合移动
-                current_prototype = prototypes_norm[class_idx]
-                target_prototype = (1 - eta) * current_prototype + eta * target_combination
-                target_prototype = F.normalize(target_prototype, dim=-1, p=2)
+                # Algorithm 2, Line 15: pczi ← (1-η)pczi + η(zi + pe_czi)
+                for sample_idx in torch.where(mask)[0]:
+                    zi = features_norm[sample_idx]  # 单个样本特征
+                    current_prototype = updated_prototypes[class_idx]
+                    equidistant_point = self.equidistant_points[class_idx]
 
-                # 计算更新损失
-                # prototype_update_loss += F.mse_loss(current_prototype, target_prototype)
+                    # 按照论文公式：zi + pe_czi
+                    target_combination = zi + equidistant_point
+                    target_combination = F.normalize(target_combination, dim=-1, p=2)
 
-                updated_prototypes[class_idx] = target_prototype
+                    # 更新原型
+                    updated_prototype = (1 - eta) * current_prototype + eta * target_combination
+                    updated_prototypes[class_idx] = F.normalize(updated_prototype, dim=-1, p=2)
 
                 # 记录分配信息
                 assignment_info[class_idx.item()] = {
                     'num_samples': num_samples,
                     'eta': eta.item(),
                     'visit_count': self.class_visit_counts[class_idx].item(),
-                    'avg_distance': distances[mask, class_idx].mean().item()
+                    'avg_distance': distances[mask, class_idx].mean().item(),
+                    'avg_similarity': similarity_matrix[mask, class_idx].mean().item()
                 }
 
         # soft_assignments
