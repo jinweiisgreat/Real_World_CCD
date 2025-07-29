@@ -120,17 +120,31 @@ class ProtoAugSpacingManager:
         features_norm = F.normalize(features, dim=-1, p=2)
         prototypes_norm = F.normalize(self.prototypes, dim=-1, p=2) # [num_prototypes, feature_dim]
 
+        # 一次性计算所有相似度（用于筛选和后续CE Loss）
+        similarities = features_norm @ prototypes_norm.T  # [batch_size, num_prototypes]
+        max_similarities, _ = similarities.max(dim=1)  # [batch_size]
+
+        # 筛选seen类样本
+        similarity_threshold = 0.9
+        seen_mask = max_similarities > similarity_threshold
+
+        if seen_mask.sum() == 0:
+            return torch.tensor(0.0, device=self.device), None
+
+        features_norm = features_norm[seen_mask]
+        similarities = similarities[seen_mask]
+
         # Step 1: 动态分配 - 将每个特征分配给最近的原型 (Algorithm 2, Line 7)
         distances = torch.cdist(features_norm, prototypes_norm)  # [batch_size, num_prototypes]
         assignments = distances.argmin(dim=1)  # [batch_size]
+        # assignments = similarities.argmax(dim=1)
 
 
         # Step 2: 计算特征到原型的损失 (Algorithm 2, Line 8)
-        # assigned_prototypes = prototypes_norm[assignments]  # [batch_size, feature_dim]
-        # feature_to_prototype_loss = F.mse_loss(features_norm, assigned_prototypes) # feature_norm/assigned_prototypes.shape: [256,768]
+        assigned_prototypes = prototypes_norm[assignments]  # [batch_size, feature_dim]
+        feature_to_prototype_loss = F.mse_loss(features_norm, assigned_prototypes) # feature_norm/assigned_prototypes.shape: [256,768]
         # CELoss
-        similarity_matrix = features_norm @ prototypes_norm.T
-        feature_to_prototype_loss = F.cross_entropy(similarity_matrix / 0.1, assignments)
+        # feature_to_prototype_loss = F.cross_entropy(similarities / 0.1, assignments)
 
         # Step 3: 更新原型，向"特征+等距点"组合移动 (Algorithm 2, Line 15)
         updated_prototypes = prototypes_norm.clone()
@@ -153,46 +167,41 @@ class ProtoAugSpacingManager:
                 self.class_visit_counts[class_idx] += num_samples
 
                 # 计算动量参数η (Algorithm 2, Line 14)
-                # eta = self.spacing_momentum / (1 + self.class_visit_counts[class_idx] * 0.01)
-                eta = 1.0 / self.class_visit_counts[class_idx]
-                eta = torch.clamp(eta, 0.001, 0.5)  # 限制η的范围
+                eta = self.spacing_momentum / (1 + self.class_visit_counts[class_idx] * 0.01)
+                # eta = 1.0 / self.class_visit_counts[class_idx]
+                eta = torch.clamp(eta, 0.001, 0.5)  #
 
-                # # 计算目标：当前特征均值 + 对应等距点 (Algorithm 2, Line 15)
-                #                 # class_features_mean = class_features.mean(dim=0)
-                #                 # equidistant_point = self.equidistant_points[class_idx]
-                #                 # target_combination = class_features_mean + equidistant_point
-                #                 #
-                #                 # # 原型更新：向目标组合移动
-                #                 # current_prototype = prototypes_norm[class_idx]
-                #                 # target_prototype = (1 - eta) * current_prototype + eta * target_combination
-                #                 # target_prototype = F.normalize(target_prototype, dim=-1, p=2)
-                #                 #
-                #                 # # 计算更新损失
-                #                 # # prototype_update_loss += F.mse_loss(current_prototype, target_prototype)
-                #                 #
-                #                 # updated_prototypes[class_idx] = target_prototype
+                # 计算目标：当前特征均值 + 对应等距点 (Algorithm 2, Line 15)
+                class_features_mean = class_features.mean(dim=0)
+                equidistant_point = self.equidistant_points[class_idx]
+                target_combination = class_features_mean + equidistant_point
+
+                # 原型更新：向目标组合移动
+                current_prototype = prototypes_norm[class_idx]
+                target_prototype = (1 - eta) * current_prototype + eta * target_combination
+                target_prototype = F.normalize(target_prototype, dim=-1, p=2)
+
+                updated_prototypes[class_idx] = target_prototype
 
                 # Algorithm 2, Line 15: pczi ← (1-η)pczi + η(zi + pe_czi)
-                for sample_idx in torch.where(mask)[0]:
-                    zi = features_norm[sample_idx]  # 单个样本特征
-                    current_prototype = updated_prototypes[class_idx]
-                    equidistant_point = self.equidistant_points[class_idx]
-
-                    # 按照论文公式：zi + pe_czi
-                    target_combination = zi + equidistant_point
-                    target_combination = F.normalize(target_combination, dim=-1, p=2)
-
-                    # 更新原型
-                    updated_prototype = (1 - eta) * current_prototype + eta * target_combination
-                    updated_prototypes[class_idx] = F.normalize(updated_prototype, dim=-1, p=2)
+                # for sample_idx in torch.where(mask)[0]:
+                #     zi = features_norm[sample_idx]  # 单个样本特征
+                #     current_prototype = updated_prototypes[class_idx]
+                #     equidistant_point = self.equidistant_points[class_idx]
+                #
+                #     # 按照论文公式：zi + pe_czi
+                #     target_combination = zi + equidistant_point
+                #     target_combination = F.normalize(target_combination, dim=-1, p=2)
+                #
+                #     # 更新原型
+                #     updated_prototype = (1 - eta) * current_prototype + eta * target_combination
+                #     updated_prototypes[class_idx] = F.normalize(updated_prototype, dim=-1, p=2)
 
                 # 记录分配信息
                 assignment_info[class_idx.item()] = {
                     'num_samples': num_samples,
                     'eta': eta.item(),
                     'visit_count': self.class_visit_counts[class_idx].item(),
-                    'avg_distance': distances[mask, class_idx].mean().item(),
-                    'avg_similarity': similarity_matrix[mask, class_idx].mean().item()
                 }
 
         # soft_assignments
@@ -248,7 +257,7 @@ class ProtoAugSpacingManager:
             self.prototypes = F.normalize(updated_prototypes, dim=-1, p=2)
 
         return feature_to_prototype_loss, assignment_info
-
+    '''
     def compute_proto_aug_hardness_aware_loss(self, model):
         """
         结合原有的prototype augmentation和新的spacing loss
@@ -278,6 +287,38 @@ class ProtoAugSpacingManager:
         proto_aug_loss = nn.CrossEntropyLoss()(prototypes_output / 0.1, prototypes_labels)
 
         return proto_aug_loss
+    '''
+    def compute_proto_aug_hardness_aware_loss(self, model):
+        prototypes = F.normalize(self.prototypes, dim=-1, p=2).to(self.device) # shape: (num_seen_classes, feature_dim) （50，768）
+
+        # hardness-aware sampling
+        # 通过hardness-aware sampling机制，使用 sampling_prob 来控制采样概率
+        # mean_similarity越高，表示原型之间越相似，采样概率越高，越需要关注这部分。
+        sampling_prob = F.softmax(self.mean_similarity / self.hardness_temp, dim=-1)
+        sampling_prob = sampling_prob.cpu().numpy()
+        # prototypes_labels = [5,5,6,7,9,11...] (范围是Session t-1的原型个数,即 Seen 的类别数)
+        prototypes_labels = np.random.choice(len(prototypes), size=(self.batch_size,), replace=True, p=sampling_prob) # shape: (batch_size*2,) (256,)
+
+        prototypes_labels = torch.from_numpy(prototypes_labels).long().to(self.device)
+
+        prototypes_sampled = prototypes[prototypes_labels] # shape: (batch_size, feature_dim) (256, 768)
+        """
+        参考ProtoAug论文
+        prototypes_sampled 是一个原型矩阵(batch_size,feature_dim)
+        prototypes_augmented 是prototypes_sampled经过加强的原型矩阵
+        然后用t-1时刻的prototypes_augmented喂给t时刻分类器，以强化seen类的分类边界
+        """
+        # 从分布中采样
+        # prototypes_augmented 包含了 batch_size 个样本
+        prototypes_augmented = prototypes_sampled + torch.randn((self.batch_size, self.feature_dim), device=self.device) * self.radius * self.radius_scale
+        print("prototypes_augmented.shape",prototypes_augmented.shape)
+        # prototypes_augmented = F.normalize(prototypes_augmented, dim=-1, p=2) # NOTE!!! DO NOT normalize
+        # forward prototypes and get logits
+        _, prototypes_output = model[1](prototypes_augmented)
+        # 这种机制确保了即使在特征空间中偏离中心点，模型仍能保持类别决策边界的稳定性
+        proto_aug_loss = nn.CrossEntropyLoss()(prototypes_output / 0.1, prototypes_labels)
+
+        return proto_aug_loss
 
     def update_prototypes_offline(self, model, train_loader, num_labeled_classes):
         """离线阶段更新prototypes并初始化等距点"""
@@ -290,7 +331,8 @@ class ProtoAugSpacingManager:
             for batch_idx, (images, label, _) in enumerate(
                     tqdm(train_loader, desc="Extracting features for prototypes")):
                 images = images.cuda(non_blocking=True)
-                feats = model.backbone(images)
+                # feats = model.backbone(images)
+                feats = model[0](images)
                 feats = torch.nn.functional.normalize(feats, dim=-1)
                 all_feats_list.append(feats)
                 all_labels_list.append(label)
@@ -345,7 +387,8 @@ class ProtoAugSpacingManager:
             for batch_idx, (images, label, _, _) in enumerate(tqdm(train_loader, desc="Updating online prototypes")):
                 images = images.cuda(non_blocking=True)
                 _, logits = model(images)
-                feats = model.backbone(images)
+                # feats = model.backbone(images)
+                feats = model[0](images)
                 feats = torch.nn.functional.normalize(feats, dim=-1)
                 all_feats_list.append(feats)
                 all_preds_list.append(logits.argmax(1))

@@ -20,6 +20,7 @@ from data.get_datasets import get_class_splits, ContrastiveLearningViewGenerator
 from models.utils_simgcd import DINOHead, get_params_groups, SupConLoss, info_nce_logits, DistillLoss
 from models.utils_simgcd_pro import get_kmeans_centroid_for_new_head
 from models.utils_proto_aug import ProtoAugManager
+# from models.utils_proto_aug_prompt_space import ProtoAugSpacingManager
 from models import vision_transformer as vits
 from config import dino_pretrain_path, exp_root
 from collections import Counter
@@ -294,6 +295,8 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             with torch.no_grad():
                 feats_pre = student_pre[0](images)
                 feats_pre = torch.nn.functional.normalize(feats_pre, dim=-1)
+
+            # spacing_loss, _ = proto_aug_manager.compute_spacing_loss(feats, model=student)
 
             # 这行代码计算的是特征蒸馏损失，用于让学生网络的特征模仿教师网络的输出，从而在增量学习中帮助保留之前学到的知识，减少灾难性遗忘。
             feat_distill_loss = (feats-feats_pre).pow(2).sum() / len(feats)
@@ -703,6 +706,7 @@ if __name__ == "__main__":
         初始化一个ProtoAugManager实例
         '''
         proto_aug_manager = ProtoAugManager(args.feat_dim, args.n_views*args.batch_size, args.hardness_temp, args.radius_scale, device, args.logger)
+        # proto_aug_manager = ProtoAugSpacingManager(args.feat_dim, args.n_views * args.batch_size, args.hardness_temp, args.radius_scale, device, args.logger, spacing_alpha = 1.2, spacing_weight=1.0)
 
         # best test acc list across continual sessions
         args.best_test_acc_all_list = []

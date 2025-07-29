@@ -895,7 +895,6 @@ if __name__ == "__main__":
     # ----------------------
     args = parser.parse_args()
     device = torch.device('cuda:0')
-    # set_seed(args.seed)
     args = get_class_splits(args)
 
     args.num_labeled_classes = len(args.train_classes)
