@@ -276,7 +276,7 @@ class TrainablePromptPoolGenerator:
 
         return prompts, community_info
 
-    def visualize_graph_network(adjacency_matrix, save_path, max_nodes=5000):
+    def visualize_graph_network(adjacency_matrix, vis_dir, max_nodes=5000):
         """
         简化版的图网络可视化函数，只显示主网络图。
 
@@ -292,6 +292,7 @@ class TrainablePromptPoolGenerator:
 
             # 设置seaborn样式提高美观度
             sns.set(style="whitegrid", context="paper", font_scale=1.2)
+            os.makedirs(vis_dir, exist_ok=True)
 
             # 如果图太大，采样节点
             n = adjacency_matrix.shape[0]
@@ -367,7 +368,7 @@ class TrainablePromptPoolGenerator:
 
             plt.axis('off')
             plt.tight_layout()
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.savefig(os.path.join(vis_dir, 'community_feature_space.png'), dpi=300, bbox_inches='tight')
             plt.close()
 
         except Exception as e:
