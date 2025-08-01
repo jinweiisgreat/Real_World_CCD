@@ -1,6 +1,4 @@
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from models.utils_prompt_pool import PromptPool
 
 

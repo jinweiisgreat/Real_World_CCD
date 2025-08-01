@@ -8,6 +8,7 @@ import argparse
 import os
 import torch
 import numpy as np
+from networkx.algorithms.bipartite.covering import min_edge_cover
 from tqdm import tqdm
 import networkx as nx
 from sklearn.metrics.pairwise import cosine_similarity
@@ -36,7 +37,7 @@ from torch.utils.data import DataLoader
 
 class VisualPromptsPoolCreator:
 
-    def __init__(self, model_path, model_type='clip', similarity_threshold=0.7, device='cuda'):
+    def __init__(self, model_path, model_type='clip', similarity_threshold=0.7, device='cuda', dataset_name=None):
         """
         初始化
 
@@ -49,6 +50,7 @@ class VisualPromptsPoolCreator:
         self.device = device
         self.similarity_threshold = similarity_threshold
         self.model_type = model_type.lower()
+        self.dataset_name = dataset_name
 
         print(f"Loading {model_type.upper()} model from {model_path}...")
 
@@ -110,19 +112,27 @@ class VisualPromptsPoolCreator:
 
                     # 使用CLIP视觉编码器提取特征
                     vision_outputs = self.model.vision_model(pixel_values=pixel_values)
-                    features = vision_outputs.pooler_output
+                    # features = vision_outputs.pooler_output
+                    features = vision_outputs.last_hidden_state[:, 0]
                 elif self.model_type == 'dino':
                     # DINOv2直接接收归一化的图像张量
                     # 如果图像已经被处理为[0,1]范围，需要调整到[-1,1]或其他DINOv2期望的范围
                     if images.max() <= 1.0:
                         # 标准化到DINOv2期望的输入范围
-                        mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(self.device)
-                        std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(self.device)
-                        images = (images - mean) / std
+                        if self.dataset_name == 'imagenet':
+                            mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(self.device)
+                            std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(self.device)
+                            images = (images - mean) / std
+                        else:
+                            mean = torch.tensor([0.4914, 0.4822, 0.4465]).view(1, 3, 1, 1).to(self.device)
+                            std = torch.tensor([0.2023, 0.1994, 0.2010]).view(1, 3, 1, 1).to(self.device)
+                            print("Using default CIFAR normalization for DINOv2")
+                            images = (images - mean) / std
 
                     # 使用DINOv2提取特征
                     outputs = self.model(pixel_values=images)
                     features = outputs.pooler_output
+                    # features = outputs.last_hidden_state[:, 0]
 
                 # L2归一化
                 features = torch.nn.functional.normalize(features, p=2, dim=1)
@@ -163,28 +173,16 @@ class VisualPromptsPoolCreator:
         # 计算余弦相似度矩阵
         print("Computing cosine similarity matrix...")
         similarity_matrix = cosine_similarity(features)
-        n_samples = len(features)
-
-        # 创建NetworkX图
-        G = nx.Graph()
-        G.add_nodes_from(range(n_samples))
-
-        # 添加边（只保留相似度高于阈值的边）
-        print("Adding edges to graph...")
-        edge_count = 0
-        for i in tqdm(range(n_samples), desc="Building graph"):
-            for j in range(i + 1, n_samples):
-                if similarity_matrix[i, j] > self.similarity_threshold:
-                    G.add_edge(i, j, weight=similarity_matrix[i, j])
-                    edge_count += 1
-
-        print(f"Graph built with {n_samples} nodes and {edge_count} edges")
+        adjacency_matrix = (similarity_matrix > self.similarity_threshold).astype(np.int8)
+        np.fill_diagonal(adjacency_matrix, 0)  # Remove self-loops
+        print("Performing community detection...")
+        G = nx.from_numpy_array(adjacency_matrix)
 
         # 检查图的连通性
         num_components = nx.number_connected_components(G)
         print(f"Graph has {num_components} connected components")
 
-        return G
+        return G, adjacency_matrix
 
     def discover_communities(self, G):
         """
@@ -199,25 +197,37 @@ class VisualPromptsPoolCreator:
         print("Discovering communities using Louvain algorithm...")
 
         # 使用Louvain算法进行社区发现
-        communities = community_louvain.best_partition(G, random_state=42)
+        partition = community_louvain.best_partition(G, resolution=1.0)
 
-        # 统计社区信息
-        community_sizes = defaultdict(int)
-        for node, community_id in communities.items():
-            community_sizes[community_id] += 1
+        # Stats community sizes
+        communities = {}
+        for node, community_id in partition.items():
+            if community_id not in communities:
+                communities[community_id] = []
+            communities[community_id].append(node)
+        print(f"Found {len(communities)} communities")
 
-        num_communities = len(community_sizes)
-        print(f"Discovered {num_communities} communities")
+        # Filter out small communities
+        min_community_size = 5
+        valid_communities = {k: v for k, v in communities.items() if len(v) >= min_community_size}
+        print(f"Found {len(valid_communities)} valid communities")
+
+        target_num_communities = 80 # num_claseses * 1.6
+        if len(valid_communities) > target_num_communities:
+            community_sizes = [(k, len(v)) for k, v in valid_communities.items()]
+            community_sizes.sort(key=lambda x: x[1], reverse=True)
+            valid_community_ids = [k for k, _ in community_sizes[:target_num_communities]]
+            valid_communities = {k: valid_communities[k] for k in valid_community_ids}
+            print(f"Found {len(valid_communities)} valid communities")
 
         # 显示社区大小分布
-        sizes = list(community_sizes.values())
+        min_size = min(len(v) for v in valid_communities.values())
+        max_size = max(len(v) for v in valid_communities.values())
         print(f"Community size statistics:")
-        print(f"  Min size: {min(sizes)}")
-        print(f"  Max size: {max(sizes)}")
-        print(f"  Mean size: {np.mean(sizes):.2f}")
-        print(f"  Std size: {np.std(sizes):.2f}")
+        print(f"  Min size: {min_size}")
+        print(f"  Max size: {max_size}")
 
-        return communities
+        return valid_communities
 
     def compute_community_centroids(self, features, labels, communities):
         """
@@ -226,7 +236,7 @@ class VisualPromptsPoolCreator:
         Args:
             features: 特征矩阵 [N, feature_dim]
             labels: 标签数组 [N]
-            communities: 社区分配字典
+            communities: 社区分配字典，格式为{community_id: [node_indices]}
 
         Returns:
             prompts_pool: prompts池 [num_communities, feature_dim]
@@ -234,15 +244,10 @@ class VisualPromptsPoolCreator:
         """
         print("Computing community centroids as prompts...")
 
-        # 按社区分组
-        community_groups = defaultdict(list)
-        for node, community_id in communities.items():
-            community_groups[community_id].append(node)
-
         prompts_pool = []
         community_info = []
 
-        for community_id, nodes in tqdm(community_groups.items(), desc="Computing centroids"):
+        for community_id, nodes in tqdm(communities.items(), desc="Computing centroids"):
             # 获取该社区的所有特征
             community_features = features[nodes]
             community_labels = labels[nodes]
@@ -307,10 +312,11 @@ class VisualPromptsPoolCreator:
 
 
         # 2. 构建相似度图
-        G = self.build_similarity_graph(features)
+        G, sim = self.build_similarity_graph(features)
 
         vis_path = os.path.join(save_dir, "prompts_pool.png")
-        self.visualize_graph_network(G, vis_path)
+
+        self.visualize_graph_network(sim, vis_path)
 
 
         # 3. 社区发现
@@ -399,189 +405,106 @@ class VisualPromptsPoolCreator:
 
         print(f"Statistics saved to {stats_path}")
 
-    """
-    def visualize_graph_network(self, G, save_path, max_nodes=5000):
-        '''
-        可视化相似度图网络
+    def visualize_graph_network(self, adjacency_matrix, save_path, max_nodes=10000):
+        """
+        简化版的图网络可视化函数，只显示主网络图。
 
         Args:
-            G: NetworkX图对象
-            save_path: 保存路径
-            max_nodes: 最大显示节点数
-        '''
-        try:
-            import matplotlib.pyplot as plt
-            import seaborn as sns
-
-            print(f"Visualizing graph network, max {max_nodes} nodes...")
-
-            # 设置样式
-            sns.set(style="whitegrid", context="paper", font_scale=1.2)
-
-            # 如果图太大，采样节点
-            n = G.number_of_nodes()
-            if n > max_nodes:
-                nodes_to_sample = np.random.choice(list(G.nodes()), max_nodes, replace=False)
-                G_sampled = G.subgraph(nodes_to_sample).copy()
-                print(f"Sampled {max_nodes} nodes from {n} total nodes")
-            else:
-                G_sampled = G
-                print(f"Using all {n} nodes")
-
-            # 计算图统计信息
-            if G_sampled.number_of_nodes() > 0:
-                avg_degree = sum(dict(G_sampled.degree()).values()) / G_sampled.number_of_nodes()
-                density = nx.density(G_sampled)
-            else:
-                avg_degree = 0
-                density = 0
-                print("Warning: No nodes in graph")
-                return
-
-            # 创建可视化
-            plt.figure(figsize=(18, 16))
-
-            # 计算布局
-            pos = nx.spring_layout(
-                G_sampled,
-                k=0.15,
-                iterations=50,
-                seed=42
-            )
-
-            # 根据度确定节点大小
-            degrees = dict(G_sampled.degree())
-            size_scale = max(1, 2000 / np.sqrt(len(G_sampled)))
-            node_sizes = [1 + 0.8 * np.sqrt(degrees[n]) * size_scale for n in G_sampled.nodes()]
-
-            # 根据边数调整透明度
-            edge_alpha = max(0.05, min(0.2, 20000 / G_sampled.number_of_edges()))
-
-            # 绘制边
-            nx.draw_networkx_edges(
-                G_sampled, pos,
-                width=1.0,
-                alpha=edge_alpha,
-                edge_color="gray"
-            )
-
-            # 绘制节点
-            nodes = nx.draw_networkx_nodes(
-                G_sampled, pos,
-                node_size=node_sizes,
-                node_color=[degrees[n] for n in G_sampled.nodes()],
-                cmap=plt.cm.viridis,
-                alpha=0.7
-            )
-
-            # 添加颜色条
-            plt.colorbar(nodes, label="Node Degree", shrink=0.6)
-
-            # 添加标题
-            plt.title(
-                f"Similarity Network\n"
-                f"Nodes: {G_sampled.number_of_nodes()}, Edges: {G_sampled.number_of_edges()}\n"
-                f"Avg Degree: {avg_degree:.2f}, Density: {density:.4f}",
-                fontsize=14
-            )
-
-            plt.axis('off')
-            plt.tight_layout()
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            plt.close()
-
-            print(f"Graph visualization saved to {save_path}")
-
-        except Exception as e:
-            print(f"Graph visualization failed: {str(e)}")
-    """
-
-    def visualize_graph_network(self, G, save_path, max_nodes=5000):
+            adjacency_matrix: 图的邻接矩阵
+            save_path: 保存可视化图的路径
+            max_nodes: 可视化的最大节点数
         """
-        可视化相似度图网络
+        import matplotlib.pyplot as plt
+        import seaborn as sns
 
-        Args:
-            G: NetworkX图对象
-            save_path: 保存路径
-            max_nodes: 最大显示节点数
-        """
-        try:
-            import matplotlib.pyplot as plt
-            import seaborn as sns
+        # 设置seaborn样式提高美观度
+        sns.set(style="whitegrid", context="paper", font_scale=1.2)
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
-            print(f"Visualizing graph network, max {max_nodes} nodes...")
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        # 如果图太大，采样节点
+        n = adjacency_matrix.shape[0]
+        if n > max_nodes:
+            indices = np.random.choice(n, max_nodes, replace=False)
+            sampled_adj_matrix = adjacency_matrix[indices][:, indices]
 
-            # 设置样式
-            sns.set(style="whitegrid", context="paper", font_scale=1.2)
+        else:
+            sampled_adj_matrix = adjacency_matrix
+            indices = np.arange(n)
 
-            # 如果图太大，采样节点
-            n = G.number_of_nodes()
-            if n > max_nodes:
-                nodes_to_sample = np.random.choice(list(G.nodes()), max_nodes, replace=False)
-                G_sampled = G.subgraph(nodes_to_sample).copy()
-                print(f"Sampled {max_nodes} nodes from {n} total nodes")
-            else:
-                G_sampled = G
-                print(f"Using all {n} nodes")
+        # 从邻接矩阵创建图
+        G = nx.from_numpy_array(sampled_adj_matrix)
 
-            # 计算图统计信息
-            if G_sampled.number_of_nodes() > 0:
-                avg_degree = sum(dict(G_sampled.degree()).values()) / G_sampled.number_of_nodes()
-                density = nx.density(G_sampled)
-            else:
-                avg_degree = 0
-                density = 0
-                print("Warning: No nodes in graph")
-                return
+        # 过滤掉度数小的节点
+        min_degree = 5
+        degrees = dict(G.degree())
+        nodes_to_keep = [node for node, degree in degrees.items() if degree >= min_degree]
+        G = G.subgraph(nodes_to_keep).copy()
 
-            # 创建可视化
-            plt.figure(figsize=(18, 16))
+        # 计算图统计信息
+        if G.number_of_nodes() > 0:
+            avg_degree = sum(dict(G.degree()).values()) / G.number_of_nodes()
+            density = nx.density(G)
+        else:
+            avg_degree = 0
+            density = 0
+            return
 
-            # 计算布局
-            pos = nx.spring_layout(
-                G_sampled,
-                k=0.15,
-                iterations=50,
-                seed=42
-            )
+        # 设置主网络可视化
+        plt.figure(figsize=(18, 16))
 
-            # 根据边数调整透明度
-            edge_alpha = max(0.05, min(0.2, 20000 / G_sampled.number_of_edges()))
+        # 计算节点位置 - 使用spring布局获得更好的分布
+        pos = nx.spring_layout(
+            G,
+            k=0.15,  # 节点之间的最佳距离（越小越紧凑）
+            iterations=50,  # 更多迭代次数以获得更好的布局
+            seed=42
+        )
 
-            # 绘制边
-            nx.draw_networkx_edges(
-                G_sampled, pos,
-                width=1.0,
-                alpha=edge_alpha,
-                edge_color="gray"
-            )
+        # 根据度确定节点大小
+        degrees = dict(G.degree())
 
-            # 绘制节点 - 不着色版本
-            nx.draw_networkx_nodes(
-                G_sampled, pos,
-                node_size=30,
-                node_color='lightblue',
-                alpha=0.7
-            )
+        # 根据节点数量自动缩放节点大小，避免过度拥挤
+        size_scale = max(1, 2000 / np.sqrt(len(G)))
+        node_sizes = [1 + 0.8 * np.sqrt(degrees[n]) * size_scale for n in G.nodes()]
 
-            # 添加标题
-            plt.title(
-                f"Similarity Network\n"
-                f"Nodes: {G_sampled.number_of_nodes()}, Edges: {G_sampled.number_of_edges()}\n"
-                f"Avg Degree: {avg_degree:.2f}, Density: {density:.4f}",
-                fontsize=14
-            )
+        # 根据边数自动调整透明度
+        edge_alpha = max(0.05, min(0.2, 20000 / G.number_of_edges()))
 
-            plt.axis('off')
-            plt.tight_layout()
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            plt.close()
+        # 绘制边
+        edges = nx.draw_networkx_edges(
+            G, pos,
+            width=0.5,
+            alpha=edge_alpha,
+            # alpha=0.1,
+            edge_color="gray"
+        )
 
-            print(f"Graph visualization saved to {save_path}")
+        # 使用基于度的颜色映射绘制节点
+        nodes = nx.draw_networkx_nodes(
+            G, pos,
+            node_size=node_sizes,
+            # node_size = 50,
+            node_color=[degrees[n] for n in G.nodes()],
+            # node_color='lightblue',
+            cmap=plt.cm.viridis,
+            alpha=0.5
+        )
 
-        except Exception as e:
-            print(f"Graph visualization failed: {str(e)}")
+        # 添加颜色条显示节点度
+        plt.colorbar(nodes, label="nodes degree", shrink=0.6)
+
+        # 添加标题和图统计信息
+        plt.title(
+            f"Similarity Network\n"
+            f"Node: {G.number_of_nodes()}, Edge: {G.number_of_edges()}\n"
+            f"Avg degree: {avg_degree:.2f}, density: {density:.4f}",
+            fontsize=14
+        )
+
+        plt.axis('off')
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
 
     def visualize_feature_space(self, features, labels, save_path):
         """
@@ -644,9 +567,11 @@ if __name__ == "__main__":
     # 模型参数
     parser.add_argument('--model_type', type=str, default='dino', choices=['clip', 'dino'],
                         help='Model type to use: clip or dino')
+    # /home/ps/_jinwei/CLIP_L14
+    # /home/ps/_jinwei/DINO_v2_base
     parser.add_argument('--model_path', type=str, default="/home/ps/_jinwei/DINO_v2_base",
                         help='Path to model')
-    parser.add_argument('--similarity_threshold', type=float, default=0.85,
+    parser.add_argument('--similarity_threshold', type=float, default=0.65,
                         help='Similarity threshold for building graph')
 
     # 处理参数
@@ -744,7 +669,8 @@ if __name__ == "__main__":
         model_path=args.model_path,
         model_type=args.model_type,
         similarity_threshold=args.similarity_threshold,
-        device=args.device
+        device=args.device,
+        dataset_name=args.dataset_name
     )
     # 执行创建过程
     prompts_pool, community_info = creator.create_prompts_pool(

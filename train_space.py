@@ -29,7 +29,7 @@ torch.autograd.set_detect_anomaly(True)
 import torch.nn as nn
 from torch.optim import SGD, lr_scheduler
 
-from project_utils.general_utils import set_seed, init_experiment, AverageMeter
+from project_utils.general_utils import init_experiment, AverageMeter
 from project_utils.cluster_and_log_utils import log_accs_from_preds
 
 from data.augmentations import get_transform
@@ -40,9 +40,8 @@ from models.utils_simgcd_pro_prompt_trainable import get_kmeans_centroid_for_new
 from models.utils_proto_aug_prompt_space import ProtoAugSpacingManager
 from models import vision_transformer as vits
 from config import dino_pretrain_path, exp_root
-from collections import Counter
 # import Enhanced PromptPool and Model
-from models.utils_prompt_pool_trainable import LearnablePromptPool, visualize_graph_network
+from models.utils_prompt_pool_trainable import LearnablePromptPool
 from models.prompt_enhanced_model_trainable import PromptEnhancedModel
 import warnings
 
