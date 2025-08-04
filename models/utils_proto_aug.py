@@ -84,7 +84,6 @@ class ProtoAugManager:
         # 从分布中采样
         # prototypes_augmented 包含了 batch_size 个样本
         prototypes_augmented = prototypes_sampled + torch.randn((self.batch_size, self.feature_dim), device=self.device) * self.radius * self.radius_scale
-        print("prototypes_augmented.shape",prototypes_augmented.shape)
         # prototypes_augmented = F.normalize(prototypes_augmented, dim=-1, p=2) # NOTE!!! DO NOT normalize
         # forward prototypes and get logits
         _, prototypes_output = model[1](prototypes_augmented)

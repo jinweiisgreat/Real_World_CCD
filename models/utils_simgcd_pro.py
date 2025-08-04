@@ -3,7 +3,6 @@ import numpy as np
 from sklearn.cluster import KMeans
 import torch
 from tqdm import tqdm
-from models.prompt_enhanced_model import PromptEnhancedModel
 
 '''
 get_kmeans_centroid_for_new_head(): use model_pre to obtain new class head init
@@ -12,7 +11,6 @@ compute_prior_old_new_ratio(): use model_cur to predict old and new ratio
 
 both use online session training data of current stage
 '''
-
 
 def get_kmeans_centroid_for_new_head(model, online_session_train_loader, args, device):
 

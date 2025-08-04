@@ -143,9 +143,6 @@ class VisualPromptsPoolCreator:
 
                 sample_count += len(labels)
 
-                if max_samples and sample_count >= max_samples:
-                    break
-
         if not all_features:
             raise RuntimeError(f"No features extracted! Check your data loader and {self.model_type.upper()} model.")
 
@@ -302,25 +299,20 @@ class VisualPromptsPoolCreator:
 
         start_time = time.time()
 
-        # 1. 提取CLIP特征
+        # 1. 提取特征
         features, labels, indices = self.extract_features(dataloader, max_samples)
 
         # 2. 可视化特征空间
-
         feature_vis_path = os.path.join(save_dir, "feature_space.png")
         self.visualize_feature_space(features, labels, feature_vis_path)
 
-
         # 2. 构建相似度图
-        G, sim = self.build_similarity_graph(features)
-
+        G, adj = self.build_similarity_graph(features)
         vis_path = os.path.join(save_dir, "prompts_pool.png")
-
-        self.visualize_graph_network(sim, vis_path)
-
+        self.visualize_graph_network(adj, vis_path)
 
         # 3. 社区发现
-        communities = self.discover_communities(G)
+        communities = self.discover_communities(G) # communities = valid_communities
         print("Communities discovered successfully!")
 
         # 4. 计算社区中心点作为prompts
