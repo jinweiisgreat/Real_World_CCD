@@ -48,7 +48,7 @@ class PromptsEnhancer(nn.Module):
         Returns:
             bool: 是否成功加载
         """
-        print(f"Loading prompts pool from {prompts_pool_path}...")
+        print(f"Loading Prepare from {prompts_pool_path}...")
 
         # 加载prompts pool数据
         with open(prompts_pool_path, 'rb') as f:
@@ -56,7 +56,7 @@ class PromptsEnhancer(nn.Module):
 
         prompts_pool = prompts_data['prompts_pool']  # [num_prompts, feature_dim]
 
-        print(f"Loaded prompts pool with shape: {prompts_pool.shape}")
+        print(f"Loaded Prepare with shape: {prompts_pool.shape}")
 
         # 转换为tensor并初始化可学习参数
         initial_prompts = torch.tensor(prompts_pool, dtype=torch.float32).to(self.device)
@@ -316,6 +316,6 @@ def create_prompts_enhancer(feature_dim, prompts_pool_path, device='cuda'):
         print("PromptsEnhancer created successfully!")
         print(f"Statistics: {enhancer.get_statistics()}")
     else:
-        print("Failed to create PromptsEnhancer with prompts pool")
+        print("Failed to create PromptsEnhancer with Prepare")
 
     return enhancer

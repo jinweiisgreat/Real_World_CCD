@@ -612,7 +612,7 @@ if __name__ == "__main__":
     parser.add_argument('--use_prompts_enhancement', action='store_true', default=False,
                         help='Whether to use prompts enhancement')
     parser.add_argument('--prompts_pool_path', type=str, default=None,
-                        help='Path to the prompts pool file')
+                        help='Path to the Prepare file')
     parser.add_argument('--prompts_weight', type=float, default=0.1,
                         help='Weight for prompts losses')
     parser.add_argument('--prompts_top_k', type=int, default=3,

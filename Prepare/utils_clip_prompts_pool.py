@@ -276,7 +276,7 @@ class VisualPromptsPoolCreator:
 
         prompts_pool = np.array(prompts_pool)
 
-        print(f"Generated prompts pool with {len(prompts_pool)} prompts")
+        print(f"Generated Prepare with {len(prompts_pool)} prompts")
 
         return prompts_pool, community_info
 
@@ -576,7 +576,7 @@ if __name__ == "__main__":
 
     # 保存参数
     parser.add_argument('--save_dir', type=str, default='./prompts_pools',
-                        help='Directory to save prompts pool')
+                        help='Directory to save Prepare')
     parser.add_argument('--exp_name', type=str, default=None,
                         help='Experiment name for saving')
 
@@ -599,6 +599,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    from get_dataset_prompts import get_full_dataset_for_prompts
+
     # 设置随机种子
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -613,7 +615,7 @@ if __name__ == "__main__":
 
     save_dir = os.path.join(args.save_dir, args.exp_name)
 
-    print(f"Starting prompts pool creation for {args.dataset_name}")
+    print(f"Starting Prepare creation for {args.dataset_name}")
     print(f"Using {len(args.train_classes)} old classes: {args.train_classes}")
     print(f"Results will be saved to: {save_dir}")
 
@@ -642,19 +644,23 @@ if __name__ == "__main__":
     ])
 
     # 获取数据集
-    offline_train_dataset, _, _, _, _, _, _ = get_datasets(
-        args.dataset_name, test_transform, test_transform, args)
+    # offline_train_dataset, _, _, _, _, _, _ = get_datasets(
+    #     args.dataset_name, test_transform, test_transform, args)
+
+    full_dataset = get_full_dataset_for_prompts(args.dataset_name, test_transform)
+    print(f"Successfully loaded {len(full_dataset)} samples")
+
 
     # 创建数据加载器
     dataloader = DataLoader(
-        offline_train_dataset,
+        full_dataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=True
     )
 
-    print(f"Loaded dataset with {len(offline_train_dataset)} samples")
+    print(f"Loaded dataset with {len(full_dataset)} samples")
 
     # 创建prompts池
     creator = VisualPromptsPoolCreator(
@@ -672,5 +678,5 @@ if __name__ == "__main__":
     )
 
     print(f"\nPrompts pool creation completed successfully!")
-    print(f"Final prompts pool shape: {prompts_pool.shape}")
+    print(f"Final Prepare shape: {prompts_pool.shape}")
     print(f"Results saved to: {save_dir}")
