@@ -11,7 +11,7 @@ CUDA_VISIBLE_DEVICES=0 python train_with_prompts.py \
     --warmup_teacher_temp 0.05 \
     --teacher_temp 0.05 \
     --warmup_teacher_temp_epochs 10 \
-    --lr 0.1 \
+    --lr 0.2 \
     --memax_old_new_weight 1 \
     --memax_old_in_weight 1 \
     --memax_new_in_weight 1 \
@@ -30,6 +30,7 @@ CUDA_VISIBLE_DEVICES=0 python train_with_prompts.py \
     --online_novel_seen_num 25 \
     --init_new_head \
     --load_offline_id Old50_Ratio0.8_20250527-153553\
+    --use_prompts_enhancement \
     --prompts_pool_path ./prompts_pools/cifar100_thresh0.7_20250731_200009/prompts_pool.pkl\
     --shuffle_classes \
     --seed 0

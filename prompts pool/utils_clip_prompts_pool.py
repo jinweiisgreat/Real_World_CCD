@@ -26,7 +26,7 @@ import torchvision.transforms as transforms
 # 添加项目路径以便导入现有模块
 import sys
 
-sys.path.append('models')
+sys.path.append('../models')
 
 from data.get_datasets import get_class_splits, get_datasets
 from data.augmentations import get_transform
@@ -586,7 +586,7 @@ if __name__ == "__main__":
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed')
 
-    parser.add_argument('--num_old_classes', type=int, default=50,
+    parser.add_argument('--num_old_classes', type=int, default=100,
                        help='Number of old classes')
     parser.add_argument('--use_ssb_splits', action='store_true', default=False,
                        help='Use SSB splits for FGVC datasets')
