@@ -26,7 +26,7 @@ import torchvision.transforms as transforms
 # 添加项目路径以便导入现有模块
 import sys
 
-sys.path.append('../models')
+sys.path.append('models')
 
 from data.get_datasets import get_class_splits, get_datasets
 from data.augmentations import get_transform
@@ -209,7 +209,7 @@ class VisualPromptsPoolCreator:
         valid_communities = {k: v for k, v in communities.items() if len(v) >= min_community_size}
         print(f"Found {len(valid_communities)} valid communities")
 
-        target_num_communities = 80 # num_claseses * 1.6
+        target_num_communities = 120 # num_claseses * 1.6
         if len(valid_communities) > target_num_communities:
             community_sizes = [(k, len(v)) for k, v in valid_communities.items()]
             community_sizes.sort(key=lambda x: x[1], reverse=True)
@@ -563,7 +563,7 @@ if __name__ == "__main__":
     # /home/ps/_jinwei/DINO_v2_base
     parser.add_argument('--model_path', type=str, default="/home/ps/_jinwei/DINO_v2_base",
                         help='Path to model')
-    parser.add_argument('--similarity_threshold', type=float, default=0.65,
+    parser.add_argument('--similarity_threshold', type=float, default=0.8,
                         help='Similarity threshold for building graph')
 
     # 处理参数
@@ -635,7 +635,7 @@ if __name__ == "__main__":
     args.online_novel_unseen_num = 400
     args.online_old_seen_num = 25
     args.online_novel_seen_num = 25
-    args.shuffle_classes = False
+    args.shuffle_classes = True
     # 使用测试变换以获得干净的特征
 
     test_transform = transforms.Compose([

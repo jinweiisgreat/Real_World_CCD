@@ -31,7 +31,7 @@ CUDA_VISIBLE_DEVICES=0 python train_with_prompts.py \
     --init_new_head \
     --load_offline_id Old50_Ratio0.8_20250527-153553\
     --use_prompts_enhancement \
-    --prompts_pool_path ./prompts_pools/cifar100_thresh0.7_20250731_200009/prompts_pool.pkl\
+    --prompts_pool_path ./prompts_pools/cifar100_thresh0.8_20250807_025923/prompts_pool.pkl\
     --shuffle_classes \
     --seed 0
 #    --prompt_pool\

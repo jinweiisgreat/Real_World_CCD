@@ -18,7 +18,8 @@ from data.get_datasets import get_class_splits, ContrastiveLearningViewGenerator
 
 from models.utils_simgcd import DINOHead, get_params_groups, SupConLoss, info_nce_logits, DistillLoss
 from models.utils_simgcd_pro import get_kmeans_centroid_for_new_head
-from models.utils_proto_aug import ProtoAugManager
+# from models.utils_proto_aug import ProtoAugManager
+from models.utils_proto_aug_prompt_space import ProtoAugSpacingManager
 from models import vision_transformer as vits
 from config import dino_pretrain_path, exp_root
 from collections import Counter
@@ -283,6 +284,9 @@ def train_online(student, student_pre, proto_aug_manager, prompts_enhancer, trai
             class_labels, mask_lab = class_labels.cuda(non_blocking=True), mask_lab.cuda(non_blocking=True).bool()
             images = torch.cat(images, dim=0).cuda(non_blocking=True)
 
+            feats = student[0](images)
+            feats = torch.nn.functional.normalize(feats, dim=-1)
+
             # 使用prompts增强的前向传播
             student_proj, student_out, enhanced_features, attention_info = forward_with_prompts_enhancement(
                 student, prompts_enhancer, images
@@ -324,9 +328,9 @@ def train_online(student, student_pre, proto_aug_manager, prompts_enhancer, trai
             contrastive_loss = torch.nn.CrossEntropyLoss()(contrastive_logits, contrastive_labels)
 
             # ProtoAug_Loss
+            spacing_loss = proto_aug_manager.compute_spacing_loss(feats,model=student)
             proto_aug_loss = proto_aug_manager.compute_proto_aug_hardness_aware_loss(student)
-            feats = student[0](images)
-            feats = torch.nn.functional.normalize(feats, dim=-1)
+
             with torch.no_grad():
                 feats_pre = student_pre[0](images)
                 feats_pre = torch.nn.functional.normalize(feats_pre, dim=-1)
@@ -349,6 +353,7 @@ def train_online(student, student_pre, proto_aug_manager, prompts_enhancer, trai
             loss += 1 * cluster_loss
             loss += 1 * contrastive_loss
             loss += args.proto_aug_weight * proto_aug_loss
+            loss += spacing_loss
             loss += args.feat_distill_weight * feat_distill_loss
             loss += args.prompts_weight * prompts_loss
 
@@ -613,9 +618,9 @@ if __name__ == "__main__":
                         help='Whether to use prompts enhancement')
     parser.add_argument('--prompts_pool_path', type=str, default=None,
                         help='Path to the Prepare file')
-    parser.add_argument('--prompts_weight', type=float, default=0.1,
+    parser.add_argument('--prompts_weight', type=float, default=0.01,
                         help='Weight for prompts losses')
-    parser.add_argument('--prompts_top_k', type=int, default=3,
+    parser.add_argument('--prompts_top_k', type=int, default=1,
                         help='Number of top prompts to use')
 
     # Continual GCD params
@@ -800,8 +805,10 @@ if __name__ == "__main__":
         v5: ProtoAug Manager
         初始化一个ProtoAugManager实例
         '''
-        proto_aug_manager = ProtoAugManager(args.feat_dim, args.n_views * args.batch_size, args.hardness_temp,
-                                            args.radius_scale, device, args.logger)
+
+        proto_aug_manager = ProtoAugSpacingManager(args.feat_dim, args.n_views * args.batch_size, args.hardness_temp,
+                                                   args.radius_scale, device, args.logger, spacing_alpha=1.2,
+                                                   spacing_weight=1.0)
 
         # best test acc list across continual sessions
         args.best_test_acc_all_list = []

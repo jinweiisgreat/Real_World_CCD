@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
-from models.prompt_enhanced_model import PromptEnhancedModel
+# from models.prompt_enhanced_model import PromptEnhancedModel
 
 
 '''
@@ -119,6 +119,7 @@ class ProtoAugSpacingManager:
 
         features_norm = F.normalize(features, dim=-1, p=2)
         prototypes_norm = F.normalize(self.prototypes, dim=-1, p=2) # [num_prototypes, feature_dim]
+        equidistant_norm = F.normalize(self.equidistant_points, dim=-1, p=2)
 
         # 一次性计算所有相似度（用于筛选和后续CE Loss）
         similarities = features_norm @ prototypes_norm.T  # [batch_size, num_prototypes]
@@ -204,90 +205,17 @@ class ProtoAugSpacingManager:
                     'visit_count': self.class_visit_counts[class_idx].item(),
                 }
 
-        # soft_assignments
-        '''
-        for class_idx in unique_assignments:
-            # 使用软分配权重来更新原型
-            class_weights = soft_assignments[:, class_idx]  # [batch_size]
+        alignment_loss = F.mse_loss(prototypes_norm, equidistant_norm)
 
-            # 只考虑对该类有显著贡献的样本（权重大于阈值）
-            threshold = 0.1
-            significant_mask = class_weights > threshold
-
-            if significant_mask.sum() > 0:
-                class_features = features_norm[significant_mask]  # 对该类有贡献的特征
-                class_weights_filtered = class_weights[significant_mask]  # 对应的权重
-
-                # 更新访问计数 - 使用加权计数
-                weighted_count = class_weights_filtered.sum().item()
-                self.class_visit_counts[class_idx] += weighted_count
-
-                # 计算动量参数η (Algorithm 2, Line 14)
-                eta = self.spacing_momentum / (1 + self.class_visit_counts[class_idx] * 0.01)
-                eta = torch.clamp(eta, 0.01, 0.5)  # 限制η的范围
-
-                # 计算加权特征均值
-                class_weights_normalized = class_weights_filtered / class_weights_filtered.sum()
-                class_features_mean = (class_features * class_weights_normalized.unsqueeze(1)).sum(dim=0)
-
-                # 计算目标：当前特征均值 + 对应等距点 (Algorithm 2, Line 15)
-                equidistant_point = self.equidistant_points[class_idx]
-                target_combination = class_features_mean + equidistant_point
-
-                # 原型更新：向目标组合移动
-                current_prototype = prototypes_norm[class_idx]
-                target_prototype = (1 - eta) * current_prototype + eta * target_combination
-                target_prototype = F.normalize(target_prototype, dim=-1, p=2)
-
-                updated_prototypes[class_idx] = target_prototype
-
-                # 记录分配信息
-                assignment_info[class_idx.item()] = {
-                    'num_samples': significant_mask.sum().item(),
-                    'weighted_count': weighted_count,
-                    'eta': eta.item(),
-                    'visit_count': self.class_visit_counts[class_idx].item(),
-                    'avg_similarity': similarity_matrix[significant_mask, class_idx].mean().item(),
-                    'max_soft_weight': class_weights_filtered.max().item()
-                }
-        '''
 
         # 更新存储的原型
         with torch.no_grad():
             self.prototypes = F.normalize(updated_prototypes, dim=-1, p=2)
 
-        return feature_to_prototype_loss, assignment_info
-    '''
-    def compute_proto_aug_hardness_aware_loss(self, model):
-        """
-        结合原有的prototype augmentation和新的spacing loss
-        """
-        if self.prototypes is None:
-            return torch.tensor(0.0, device=self.device)
+        # return feature_to_prototype_loss, assignment_info
+        return alignment_loss
 
-        prototypes = F.normalize(self.prototypes, dim=-1, p=2).to(self.device)
 
-        # 原有的hardness-aware sampling
-        sampling_prob = F.softmax(self.mean_similarity / self.hardness_temp, dim=-1)
-        sampling_prob = sampling_prob.cpu().numpy()
-        prototypes_labels = np.random.choice(len(prototypes), size=(self.batch_size,), replace=True, p=sampling_prob)
-        prototypes_labels = torch.from_numpy(prototypes_labels).long().to(self.device)
-
-        prototypes_sampled = prototypes[prototypes_labels]
-        prototypes_augmented = prototypes_sampled + torch.randn((self.batch_size, self.feature_dim),
-                                                                device=self.device) * self.radius * self.radius_scale
-
-        # 通过模型获得增强原型的输出
-        if isinstance(model, PromptEnhancedModel):
-            enhanced_prototypes, _ = model.prompt_pool.forward(prototypes_augmented)
-            _, prototypes_output = model.projector(enhanced_prototypes)
-        else:
-            _, prototypes_output = model.projector(prototypes_augmented)
-
-        proto_aug_loss = nn.CrossEntropyLoss()(prototypes_output / 0.1, prototypes_labels)
-
-        return proto_aug_loss
-    '''
     def compute_proto_aug_hardness_aware_loss(self, model):
         prototypes = F.normalize(self.prototypes, dim=-1, p=2).to(self.device) # shape: (num_seen_classes, feature_dim) （50，768）
 
@@ -311,7 +239,6 @@ class ProtoAugSpacingManager:
         # 从分布中采样
         # prototypes_augmented 包含了 batch_size 个样本
         prototypes_augmented = prototypes_sampled + torch.randn((self.batch_size, self.feature_dim), device=self.device) * self.radius * self.radius_scale
-        print("prototypes_augmented.shape",prototypes_augmented.shape)
         # prototypes_augmented = F.normalize(prototypes_augmented, dim=-1, p=2) # NOTE!!! DO NOT normalize
         # forward prototypes and get logits
         _, prototypes_output = model[1](prototypes_augmented)
@@ -402,7 +329,8 @@ class ProtoAugSpacingManager:
             feats_c = all_feats[all_preds == c]
             if len(feats_c) == 0:
                 self.logger.info(f'No pred of class {c}, using fc parameters...')
-                feats_c_mean = model.projector.last_layer.weight_v.data[c]
+                # feats_c_mean = model.projector.last_layer.weight_v.data[c]
+                feats_c_mean = model[1].last_layer.weight_v.data[c]
             else:
                 self.logger.info(f'Computing class-wise mean for class {c}...')
                 feats_c_mean = torch.mean(feats_c, dim=0)
