@@ -4,7 +4,7 @@
 set -e
 set -x
 
-CUDA_VISIBLE_DEVICES=0 python train_with_prompts.py \
+CUDA_VISIBLE_DEVICES=0 python train_clip.py \
     --dataset_name 'cifar100' \
     --batch_size 128 \
     --transform 'imagenet' \
@@ -23,15 +23,13 @@ CUDA_VISIBLE_DEVICES=0 python train_with_prompts.py \
     --num_old_classes 50 \
     --prop_train_labels 0.8 \
     --train_session online \
-    --epochs_online_per_session 30 \
+    --epochs_online_per_session 50 \
     --continual_session_num 5 \
     --online_novel_unseen_num 400 \
     --online_old_seen_num 25 \
     --online_novel_seen_num 25 \
     --init_new_head \
-    --load_offline_id Old50_Ratio0.8_20250527-153553\
-    --use_prompts_enhancement \
-    --prompts_pool_path ./prompts_pools/cifar100_thresh0.8_20250807_025923/prompts_pool.pkl\
+    --load_offline_id Old50_Ratio0.8_20250527-153553 \
     --shuffle_classes \
     --seed 0
 #    --prompt_pool\

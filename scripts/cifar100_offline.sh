@@ -4,7 +4,7 @@ set -e
 set -x
 
 # Run training script with parameters
-CUDA_VISIBLE_DEVICES=0 python train_adbs.py \
+CUDA_VISIBLE_DEVICES=0 python train_clip.py \
     --dataset_name 'cifar100' \
     --batch_size 128 \
     --transform 'imagenet' \
