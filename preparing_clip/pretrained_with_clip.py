@@ -3,13 +3,13 @@ from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 from torch.optim import SGD, lr_scheduler
 from torch.nn import functional as F
-from data.get_datasets import get_datasets
-from data.augmentations import get_transform
-from project_utils.loss_utils import ContrastiveLearningViewGenerator, StrongWeakView
+from Data.get_datasets import get_datasets
+from Data.get_transform import get_transform
+from models.utils_simgcd import ContrastiveLearningViewGenerator
 from project_utils.cluster_utils import mixed_eval, AverageMeter
-from data.get_datasets import get_datasets, get_class_splits
-from models.cocoop_ovdet import CustomCLIP
-from models.customloss import DistillLoss, AlignLoss
+from Data.get_datasets import get_datasets, get_class_splits
+from cocoop import CustomCLIP
+from CustomLoss import DistillLoss, AlignLoss
 import clip
 from tqdm import tqdm
 from utils.gpu_utils import check_gpu
@@ -95,8 +95,8 @@ def main():
     currentTime = time.localtime()
     start_time = time.strftime("%Y_%m_%d_%H_%M_%S", currentTime)  # 用来记录时间
 
-    pth_save_path = f'./result/pretrained_model_save'
-    log_save_path = f'./result/log'
+    pth_save_path = f'./preparing_clip/result/pretrained_model_save'
+    log_save_path = f'./preparing_clip/result/log'
     if not os.path.exists(pth_save_path):
         os.mkdir(pth_save_path + '/')
     if not os.path.exists(log_save_path):

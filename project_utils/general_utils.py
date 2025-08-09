@@ -30,6 +30,58 @@ class AverageMeter(object):
         self.count += n
         self.avg = self.sum / self.count
 
+def get_mean_lr(optimizer):
+    return torch.mean(torch.Tensor([param_group['lr'] for param_group in optimizer.param_groups])).item()
+
+def get_dino_head_weights(pretrain_path):
+
+    """
+    :param pretrain_path: Path to full DINO pretrained checkpoint as in https://github.com/facebookresearch/dino
+     'full_ckpt'
+    :return: weights only for the projection head
+    """
+
+    all_weights = torch.load(pretrain_path)
+
+    head_state_dict = {}
+    for k, v in all_weights['teacher'].items():
+        if 'head' in k and 'last_layer' not in k:
+            head_state_dict[k] = v
+
+    head_state_dict = strip_state_dict(head_state_dict, strip_key='head.')
+
+    # Deal with weight norm
+    weight_norm_state_dict = {}
+    for k, v in all_weights['teacher'].items():
+        if 'last_layer' in k:
+            weight_norm_state_dict[k.split('.')[2]] = v
+
+    linear_shape = weight_norm_state_dict['weight'].shape
+    dummy_linear = torch.nn.Linear(in_features=linear_shape[1], out_features=linear_shape[0], bias=False)
+    dummy_linear.load_state_dict(weight_norm_state_dict)
+    dummy_linear = torch.nn.utils.weight_norm(dummy_linear)
+
+    for k, v in dummy_linear.state_dict().items():
+
+        head_state_dict['last_layer.' + k] = v
+
+    return head_state_dict
+
+def accuracy(output, target, topk=(1,)):
+    """Computes the accuracy over the k top predictions for the specified values of k"""
+    with torch.no_grad():
+        maxk = max(topk)
+        batch_size = target.size(0)
+
+        _, pred = output.topk(maxk, 1, True, True)
+        pred = pred.t()
+        correct = pred.eq(target.reshape(1, -1).expand_as(pred))
+
+        res = []
+        for k in topk:
+            correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
+            res.append(correct_k.mul_(100.0 / batch_size))
+        return res
 
 def set_seed(seed, cuda=True):
     random.seed(seed)
