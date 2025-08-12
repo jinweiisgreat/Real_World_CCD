@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 import math
 from tqdm import tqdm
 from copy import deepcopy
@@ -18,8 +19,8 @@ from data.augmentations import get_transform
 from data.get_datasets import get_class_splits, ContrastiveLearningViewGenerator, get_datasets
 
 from models.utils_simgcd import DINOHead, get_params_groups, SupConLoss, info_nce_logits, DistillLoss
-from models.utils_simgcd_pro import get_kmeans_centroid_for_new_head
-from models.utils_proto_aug import ProtoAugManager
+from models.utils_simgcd_pro import get_kmeans_centroid_for_new_head_clip
+from models.utils_proto_aug_clip import ProtoAugManager
 
 from config import exp_root
 from collections import Counter
@@ -27,8 +28,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import confusion_matrix
 import setproctitle
-
 setproctitle.setproctitle("clip continual gcd")
+
+sys.path.insert(0, '/home/ps/_jinwei/Happy-CGCD/preparing_clip/')
 
 import warnings
 
@@ -48,13 +50,35 @@ class WeightedGamma(nn.Module):
         fusion_feat = self.gamma * img_feats + (1 - self.gamma) * txt_feats
         return F.normalize(fusion_feat, dim=-1)
 
+def change_need_grad(model, optim_params=None):
+    """用于根据参数名，修改CLIP的image encoder中的参数"是否要回传梯度"""
+    for name, parms in model.named_parameters():
+        if name in optim_params:
+            parms.requires_grad = True
+        else:
+            parms.requires_grad = False  # 名字不在array中的全部参数冻结
+
+def get_optim_params(model_name: str):
+    """用于确认CLIP的image encoder哪些参数要回传梯度"""
+    return ['visual.transformer.resblocks.23.attn.in_proj_weight',
+            'visual.transformer.resblocks.23.attn.in_proj_bias',
+            'visual.transformer.resblocks.23.attn.out_proj.weight',
+            'visual.transformer.resblocks.23.attn.out_proj.bias',
+            'visual.transformer.resblocks.23.ln_1.weight',
+            'visual.transformer.resblocks.23.ln_1.bias',
+            'visual.transformer.resblocks.23.mlp.c_fc.weight',
+            'visual.transformer.resblocks.23.mlp.c_fc.bias',
+            'visual.transformer.resblocks.23.mlp.c_proj.weight',
+            'visual.transformer.resblocks.23.mlp.c_proj.bias',
+            'visual.transformer.resblocks.23.ln_2.weight',
+            'visual.transformer.resblocks.23.ln_2.bias']
 
 def get_clip_features_and_fusion(clip_model, weighted_gamma, images):
     """获取CLIP特征并进行融合"""
-    with torch.no_grad():
-        all_img_feats, all_txt_feats = clip_model(images)
-
-    # 融合图像和文本特征
+    # 移除torch.no_grad()，允许梯度回传
+    all_img_feats, all_txt_feats = clip_model(images)
+    all_img_feats = all_img_feats.float()
+    all_txt_feats = all_txt_feats.float()
     fusion_feat = weighted_gamma(all_img_feats, all_txt_feats)
     return fusion_feat
 
@@ -67,7 +91,8 @@ def train_offline_clip(clip_model, projector, weighted_gamma, train_loader, test
     """离线训练阶段 - 使用CLIP特征，与clip_simgcd保持一致"""
 
     # 设置优化器 - 包含projector和weighted_gamma的参数
-    optimizer = SGD(list(projector.parameters()) + list(weighted_gamma.parameters()),
+    clip_trainable_params = [p for p in clip_model.parameters() if p.requires_grad]
+    optimizer = SGD(list(projector.parameters()) + list(weighted_gamma.parameters()) + clip_trainable_params,
                     lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
 
     exp_lr_scheduler = lr_scheduler.CosineAnnealingLR(
@@ -89,11 +114,10 @@ def train_offline_clip(clip_model, projector, weighted_gamma, train_loader, test
     for epoch in range(args.epochs_offline):
         loss_record = AverageMeter()
 
-        clip_model.eval()  # CLIP保持eval模式
-        projector.train()
-        weighted_gamma.train()
 
+        clip_model.train()
         for batch_idx, batch in enumerate(train_loader):
+
             images, class_labels, uq_idxs = batch
             mask_lab = torch.ones_like(class_labels)  # 所有样本都是标注的
 
@@ -108,37 +132,30 @@ def train_offline_clip(clip_model, projector, weighted_gamma, train_loader, test
             student_proj, student_out = projector(fusion_feat.float())
             teacher_out = student_out.detach()
 
-            # 超过warm_up_epoch后开始计算损失
-            if epoch >= args.warm_up_epoch:
-                # 监督分类损失
-                sup_logits = torch.cat([f[mask_lab] for f in (student_out / 0.1).chunk(2)], dim=0)
-                sup_labels = torch.cat([class_labels[mask_lab] for _ in range(2)], dim=0)
-                cls_loss = nn.CrossEntropyLoss()(sup_logits, sup_labels)
+            sup_logits = torch.cat([f[mask_lab] for f in (student_out / 0.1).chunk(2)], dim=0)
+            sup_labels = torch.cat([class_labels[mask_lab] for _ in range(2)], dim=0)
+            cls_loss = nn.CrossEntropyLoss()(sup_logits, sup_labels)
 
-                # 聚类损失
-                cluster_loss = cluster_criterion(student_out, teacher_out, epoch - args.warm_up_epoch)
-                avg_probs = (student_out / 0.1).softmax(dim=1).mean(dim=0)
-                me_max_loss = - torch.sum(torch.log(avg_probs ** (-avg_probs))) + math.log(float(len(avg_probs)))
-                cluster_loss += args.memax_weight * me_max_loss
-
-                # 总的分类损失
-                loss = (1 - args.sup_weight) * cluster_loss + args.sup_weight * cls_loss
-            else:
-                cls_loss = torch.tensor(0.0).cuda()
-                cluster_loss = torch.tensor(0.0).cuda()
-                loss = torch.tensor(0.0).cuda()
+            # 聚类损失
+            cluster_loss = cluster_criterion(student_out, teacher_out, epoch - args.warm_up_epoch)
+            avg_probs = (student_out / 0.1).softmax(dim=1).mean(dim=0)
+            me_max_loss = - torch.sum(torch.log(avg_probs ** (-avg_probs))) + math.log(float(len(avg_probs)))
+            cluster_loss += args.memax_weight * me_max_loss
 
             # 对比学习损失
             contrastive_logits, contrastive_labels = info_nce_logits(features=student_proj)
             contrastive_loss = torch.nn.CrossEntropyLoss()(contrastive_logits, contrastive_labels)
 
             # 监督对比学习损失
-            student_proj_sup = torch.cat([f[mask_lab].unsqueeze(1) for f in student_proj.chunk(2)], dim=1)
-            student_proj_sup = torch.nn.functional.normalize(student_proj_sup, dim=-1)
-            sup_con_labels = class_labels[mask_lab]
-            sup_con_loss = SupConLoss()(student_proj_sup, labels=sup_con_labels)
+            student_proj = torch.cat([f[mask_lab].unsqueeze(1) for f in student_proj.chunk(2)], dim=1)
+            student_proj = torch.nn.functional.normalize(student_proj, dim=-1)
 
-            # 添加对比学习损失
+            sup_con_labels = class_labels[mask_lab]
+            sup_con_loss = SupConLoss()(student_proj, labels=sup_con_labels)
+
+            # 总的分类损失
+            loss = 0
+            loss += (1 - args.sup_weight) * cluster_loss + args.sup_weight * cls_loss
             loss += (1 - args.sup_weight) * contrastive_loss + args.sup_weight * sup_con_loss
 
             # 日志
@@ -232,7 +249,8 @@ def train_online_clip(clip_model, projector_cur, projector_pre, weighted_gamma, 
     """在线训练阶段 - 使用CLIP特征"""
 
     # 设置优化器
-    optimizer = SGD(list(projector_cur.parameters()) + list(weighted_gamma.parameters()),
+    clip_trainable_params = [p for p in clip_model.parameters() if p.requires_grad]
+    optimizer = SGD(list(projector_cur.parameters()) + list(weighted_gamma.parameters()) + clip_trainable_params,
                     lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
 
     exp_lr_scheduler = lr_scheduler.CosineAnnealingLR(
@@ -553,7 +571,7 @@ if __name__ == "__main__":
                         help='options: current_session, cumulative_session')
 
     # CLIP相关参数
-    parser.add_argument('--clip_model_path', type=str, default="/home/ps/_jinwei/SimGCD/result/pretrained_model_save/2024_09_13_20_07_28/cifar100_clip_ep100.pth", help='Path to pre-trained CLIP model')
+    parser.add_argument('--clip_model_path', type=str, default="/home/ps/_jinwei/Happy-CGCD/preparing_clip/result/pretrained_model_save/cifar100_clip_ep100_coarse.pth", help='Path to pre-trained CLIP model')
     parser.add_argument('--warm_up_epoch', default=0, type=int,
                         help='Warm up epochs before computing classification loss')
 
@@ -596,10 +614,12 @@ if __name__ == "__main__":
     # ----------------------
     args.logger.info(f'Loading CLIP model from {args.clip_model_path}')
     clip_model = torch.load(args.clip_model_path, map_location='cpu').cuda()
-    clip_model.eval()  # CLIP模型保持在eval模式
-    for param in clip_model.parameters():
-        param.requires_grad = False  # 冻结CLIP参数
-    args.logger.info('CLIP model loaded and frozen')
+
+    # 设置CLIP模型微调最后一层
+    optim_params = get_optim_params('ViT-L/14')
+    change_need_grad(clip_model.model, optim_params=optim_params)
+    clip_model.train()  # 设置为训练模式
+    args.logger.info('CLIP model loaded with last layer trainable')
 
     # 创建特征融合模块
     weighted_gamma = WeightedGamma(args).cuda()
@@ -823,11 +843,9 @@ if __name__ == "__main__":
 
             if args.init_new_head:
                 # 创建用于K-means初始化的临时模型
-                temp_model_for_kmeans = lambda images: (None, projector_pre(
-                    get_clip_features_and_fusion(clip_model, weighted_gamma, images)))
-                new_head = get_kmeans_centroid_for_new_head_clip(temp_model_for_kmeans,
-                                                                 online_session_train_loader_for_new_head_init, args,
-                                                                 device)
+                new_head = get_kmeans_centroid_for_new_head_clip(
+                    clip_model, projector_pre, weighted_gamma,
+                    online_session_train_loader_for_new_head_init, args, device)
 
                 norm_new_head_weight_v = torch.norm(projector_cur.last_layer.weight_v.data[args.num_seen_classes:],
                                                     dim=-1).mean()
@@ -918,142 +936,3 @@ if __name__ == "__main__":
 
     else:
         raise NotImplementedError
-
-
-def get_kmeans_centroid_for_new_head_clip(model_func, online_session_train_loader, args, device):
-    """为CLIP特征定制的K-means初始化函数"""
-    from sklearn.cluster import KMeans
-
-    all_feats = []
-    args.logger.info('Perform KMeans for new classification head initialization!')
-    args.logger.info('Collating features...')
-
-    with torch.no_grad():
-        for batch_idx, (images, label, _, _) in enumerate(tqdm(online_session_train_loader)):
-            images = images.cuda(non_blocking=True)
-            feats, _ = model_func(images)  # 使用临时模型函数获取特征
-            all_feats.append(feats.cpu().numpy())
-
-    # K-MEANS
-    print('Fitting K-Means...')
-    all_feats = np.concatenate(all_feats)
-    kmeans = KMeans(n_clusters=args.num_labeled_classes + args.num_cur_novel_classes, random_state=0).fit(all_feats)
-    centroids_np = kmeans.cluster_centers_
-    print('Done!')
-
-    centroids = torch.from_numpy(centroids_np).to(device)
-    centroids = torch.nn.functional.normalize(centroids, dim=-1)
-
-    with torch.no_grad():
-        # 使用前一个投影头来判断哪些质心属于新类别
-        from models.utils_simgcd_pro import get_kmeans_centroid_for_new_head
-        # 这里需要创建一个临时的包装来兼容原始函数的接口
-        class TempModel:
-            def __init__(self, model_func):
-                self.model_func = model_func
-
-            def __call__(self, images):
-                return self.model_func(images)
-
-            def __getitem__(self, idx):
-                if idx == 1:  # projector
-                    return lambda x: self.model_func(torch.zeros_like(x))[1]  # 返回logits
-
-        temp_model = TempModel(model_func)
-        _, logits = temp_model[1](centroids)
-        max_logits, _ = torch.max(logits, dim=-1)
-        _, proto_idx = torch.topk(max_logits, k=args.num_novel_class_per_session, largest=False)
-        new_head = centroids[proto_idx]
-
-    return new_head
-
-
-# 为ProtoAugManager添加CLIP支持的方法
-def update_prototypes_offline_clip(self, model_func, train_loader, num_labeled_classes):
-    """为CLIP特征定制的离线原型更新"""
-    all_feats_list = []
-    all_labels_list = []
-
-    for batch_idx, (images, label, _) in enumerate(tqdm(train_loader)):
-        images = images.cuda(non_blocking=True)
-        with torch.no_grad():
-            feats, _ = model_func(images)
-            all_feats_list.append(feats)
-            all_labels_list.append(label)
-
-    all_feats = torch.cat(all_feats_list, dim=0)
-    all_labels = torch.cat(all_labels_list, dim=0)
-
-    # 计算原型和半径
-    prototypes_list = []
-    radius_list = []
-    for c in range(num_labeled_classes):
-        feats_c = all_feats[all_labels == c]
-        feats_c_mean = torch.mean(feats_c, dim=0)
-        prototypes_list.append(feats_c_mean)
-        feats_c_center = feats_c - feats_c_mean
-        cov = torch.matmul(feats_c_center.t(), feats_c_center) / len(feats_c_center)
-        radius = torch.trace(cov) / self.feature_dim
-        radius_list.append(radius)
-
-    avg_radius = torch.sqrt(torch.mean(torch.stack(radius_list)))
-    prototypes_all = torch.stack(prototypes_list, dim=0)
-    prototypes_all = F.normalize(prototypes_all, dim=-1, p=2)
-
-    # 更新
-    self.radius = avg_radius
-    self.prototypes = prototypes_all
-
-    # 更新平均相似度
-    similarity = prototypes_all @ prototypes_all.T
-    for i in range(len(similarity)):
-        similarity[i, i] -= similarity[i, i]
-    mean_similarity = torch.sum(similarity, dim=-1) / (len(similarity) - 1)
-    self.mean_similarity = mean_similarity
-
-
-def update_prototypes_online_clip(self, model_func, train_loader, num_seen_classes, num_all_classes):
-    """为CLIP特征定制的在线原型更新"""
-    all_preds_list = []
-    all_feats_list = []
-
-    for batch_idx, (images, label, _, _) in enumerate(tqdm(train_loader)):
-        images = images.cuda(non_blocking=True)
-        with torch.no_grad():
-            feats, logits = model_func(images)
-            all_feats_list.append(feats)
-            all_preds_list.append(logits.argmax(1))
-
-    all_feats = torch.cat(all_feats_list, dim=0)
-    all_preds = torch.cat(all_preds_list, dim=0)
-
-    # 计算新类别原型
-    prototypes_list = []
-    for c in range(num_seen_classes, num_all_classes):
-        feats_c = all_feats[all_preds == c]
-        if len(feats_c) == 0:
-            self.logger.info('No pred of this class, using random initialization...')
-            feats_c_mean = torch.randn(self.feature_dim, device=self.device)
-        else:
-            self.logger.info('computing (predicted) class-wise mean...')
-            feats_c_mean = torch.mean(feats_c, dim=0)
-        prototypes_list.append(feats_c_mean)
-
-    prototypes_cur = torch.stack(prototypes_list, dim=0)
-    prototypes_all = torch.cat([self.prototypes, prototypes_cur], dim=0)
-    prototypes_all = F.normalize(prototypes_all, dim=-1, p=2)
-
-    # 更新
-    self.prototypes = prototypes_all
-
-    # 更新平均相似度
-    similarity = prototypes_all @ prototypes_all.T
-    for i in range(len(similarity)):
-        similarity[i, i] -= similarity[i, i]
-    mean_similarity = torch.sum(similarity, dim=-1) / (len(similarity) - 1)
-    self.mean_similarity = mean_similarity
-
-
-# 将新方法绑定到ProtoAugManager类
-ProtoAugManager.update_prototypes_offline_clip = update_prototypes_offline_clip
-ProtoAugManager.update_prototypes_online_clip = update_prototypes_online_clip

@@ -5,7 +5,7 @@ from copy import deepcopy
 from torchvision.datasets.folder import default_loader
 from torch.utils.data import Dataset
 
-from data.data_utils import subsample_instances
+from Data.data_utils import subsample_instances
 from config import aircraft_root
 
 def make_dataset(dir, image_ids, targets):

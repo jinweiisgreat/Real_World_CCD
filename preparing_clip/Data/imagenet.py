@@ -4,7 +4,7 @@ import numpy as np
 import os
 
 from copy import deepcopy
-from data.data_utils import subsample_instances
+from Data.data_utils import subsample_instances
 from config import imagenet_root
 import json
 

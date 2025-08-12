@@ -4,7 +4,7 @@ import torchvision
 import numpy as np
 from copy import deepcopy
 
-from data.data_utils import subsample_instances
+from Data.data_utils import subsample_instances
 from config import herbarium_dataroot
 
 class HerbariumDataset19(torchvision.datasets.ImageFolder):

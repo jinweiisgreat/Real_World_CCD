@@ -7,7 +7,7 @@ from torchvision.datasets.folder import default_loader
 from torchvision.datasets.utils import download_url
 from torch.utils.data import Dataset
 
-from data.data_utils import subsample_instances
+from Data.data_utils import subsample_instances
 from config import cub_root
 
 

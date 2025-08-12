@@ -7,7 +7,7 @@ from scipy import io as mat_io
 from torchvision.datasets.folder import default_loader
 from torch.utils.data import Dataset
 
-from data.data_utils import subsample_instances
+from Data.data_utils import subsample_instances
 from config import car_root
 
 class CarsDataset(Dataset):

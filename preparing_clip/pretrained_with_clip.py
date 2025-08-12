@@ -1,3 +1,11 @@
+import sys
+import os
+
+# 添加项目根目录到Python路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)  # 向上一级到项目根目录
+sys.path.insert(0, project_root)
+
 import torch
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
@@ -97,21 +105,12 @@ def main():
 
     pth_save_path = f'./preparing_clip/result/pretrained_model_save'
     log_save_path = f'./preparing_clip/result/log'
-    if not os.path.exists(pth_save_path):
-        os.mkdir(pth_save_path + '/')
-    if not os.path.exists(log_save_path):
-        os.mkdir(log_save_path + '/')
-    pth_save_path = pth_save_path + f'/{start_time}'
-    log_save_path = log_save_path + f'/{start_time}'
-    if not os.path.exists(pth_save_path):
-        os.mkdir(pth_save_path + '/')
-    if not os.path.exists(log_save_path):
-        os.mkdir(log_save_path + '/')
+
     metriclog = open(log_save_path + '/train_log_with_clip.log', 'w')  # 创建日志文件
     metriclog.write('lr: ' + str(args.lr) + "\n")
     metriclog.write('batch_size: ' + str(args.batch_size) + "\n")
 
-    args.txt_file_name = f"./pth/{args.dataset_name}_a_photo_of_label.pth"
+    args.txt_file_name = f"./preparing_clip/pth/{args.dataset_name}_a_photo_of_label.pth"
 
     metriclog.write('txt_file_name: ' + args.txt_file_name + "\n")
 
@@ -206,15 +205,6 @@ def main():
         print(f'start_time:{start_time}')
 
         save_epoch = epoch + 1
-        # if save_epoch % 1 == 0:
-        #     #每五个epoch保存一次
-        #     torch.save(clip_model, f'{pth_save_path}/{args.dataset_name}_clip_ep{save_epoch}_coarse.pth') #cifar10
-        #     torch.cuda.empty_cache()
-        # if save_epoch % 15 == 0:
-        #     #每十五个epoch清空一次
-        #     torch.cuda.empty_cache()
-        #     #清空缓存会使得占用忽高忽低（虽然不改变最高占用）
-        #     #不清空的话，缓存会逐渐增加
         if save_epoch == args.epochs:
             torch.save(
                 clip_model,
