@@ -241,7 +241,7 @@ def train_online(student, student_pre, proto_aug_manager, prompts_enhancer, trai
                  args):
     # 添加默认warm up epochs参数
     if not hasattr(args, 'warmup_epochs'):
-        args.warmup_epochs = 20
+        args.warmup_epochs = 0
 
     cluster_criterion = DistillLoss(
         args.warmup_teacher_temp_epochs,
@@ -356,7 +356,8 @@ def train_online(student, student_pre, proto_aug_manager, prompts_enhancer, trai
 
             # ProtoAug_Loss
             # spacing_loss = proto_aug_manager.compute_spacing_loss(feats, model=student)
-            proto_aug_loss = proto_aug_manager.compute_proto_aug_hardness_aware_loss(student)
+            # proto_aug_loss = proto_aug_manager.compute_proto_aug_hardness_aware_loss(student)
+            proto_aug_loss= proto_aug_manager.compute_proto_aug_loss(student)
 
             with torch.no_grad():
                 feats_pre = student_pre[0](images)
@@ -611,7 +612,7 @@ if __name__ == "__main__":
     parser.add_argument('--sup_weight', type=float, default=0.35)
     parser.add_argument('--n_views', default=2, type=int)
     parser.add_argument('--contrast_unlabel_only', action='store_true', default=False)
-    parser.add_argument('--warmup_epochs', default=20, type=int,
+    parser.add_argument('--warmup_epochs', default=0, type=int,
                         help='Number of warmup epochs before using prompts enhancement')
 
     '''group-wise entropy regularization'''
@@ -640,7 +641,7 @@ if __name__ == "__main__":
     parser.add_argument('--hardness_temp', type=float, default=0.1)
 
     '''Prompts Enhancement params'''
-    parser.add_argument('--use_prompts_enhancement', action='store_true', default=False,
+    parser.add_argument('--use_prompts_enhancement', action='store_true', default=True,
                         help='Whether to use prompts enhancement')
     parser.add_argument('--prompts_pool_path', type=str, default=None,
                         help='Path to the Prepare file')

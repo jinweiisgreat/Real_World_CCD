@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
-from models.prompt_enhanced_model import PromptEnhancedModel
+from models.prompt_enhanced_model_trainable import PromptEnhancedModel
 
 
 class ProtoAugManager:

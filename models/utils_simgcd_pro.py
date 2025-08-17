@@ -12,50 +12,50 @@ compute_prior_old_new_ratio(): use model_cur to predict old and new ratio
 both use online session training data of current stage
 '''
 
-# def get_kmeans_centroid_for_new_head(model, online_session_train_loader, args, device):
-#
-#     model.to(device)
-#     model.eval()
-#
-#     all_feats = []
-#
-#     args.logger.info('Perform KMeans for new classification head initialization!')
-#     args.logger.info('Collating features...')
-#     # First extract all features
-#     with torch.no_grad():
-#         for batch_idx, (images, label, _, _) in enumerate(tqdm(online_session_train_loader)):
-#             images = images.cuda(non_blocking=True) # shape: (batch_size*2, 3, 224, 224)
-#             # Pass features through base model and then additional learnable transform (linear layer)
-#             feats = model[0](images)   # backbone
-#             feats = torch.nn.functional.normalize(feats, dim=-1)
-#             all_feats.append(feats.cpu().numpy())
-#
-#     # -----------------------
-#     # K-MEANS
-#     # -----------------------
-#     print('Fitting K-Means...')
-#     all_feats = np.concatenate(all_feats)
-#     kmeans = KMeans(n_clusters=args.num_labeled_classes+args.num_cur_novel_classes, random_state=0).fit(all_feats)
-#     #preds = kmeans.labels_
-#     centroids_np = kmeans.cluster_centers_   # (60, 768)
-#     print('Done!')
-#
-#     centroids = torch.from_numpy(centroids_np).to(device)
-#     centroids = torch.nn.functional.normalize(centroids, dim=-1)   # torch.Size([60, 768])
-#     #centroids = centroids.float()
-#     with torch.no_grad():
-#         """
-#         model[1]内部的last_layer计算质心向量与已知类别原型间的余弦相似度
-#         这产生logits张量，表示每个质心属于已知类别的可能性
-#         """
-#         _, logits = model[1](centroids)   # torch.Size([60, 50]) 从50个已知类分类头去预测60个类（新来了10个）它利用了旧模型的"无知"来识别新类！
-#         max_logits, _ = torch.max(logits, dim=-1)   # torch.Size([60])
-#         _, proto_idx = torch.topk(max_logits, k=args.num_novel_class_per_session, largest=False)   # torch.Size([10]) 当largest=False时，返回最小的k个元素
-#         new_head = centroids[proto_idx]   # torch.Size([10, 768])
-#
-#     return new_head
+def get_kmeans_centroid_for_new_head(model, online_session_train_loader, args, device):
 
-def get_kmeans_centroid_for_new_head_clip(clip_model, projector_pre, weighted_gamma, online_session_train_loader, args,
+    model.to(device)
+    model.eval()
+
+    all_feats = []
+
+    args.logger.info('Perform KMeans for new classification head initialization!')
+    args.logger.info('Collating features...')
+    # First extract all features
+    with torch.no_grad():
+        for batch_idx, (images, label, _, _) in enumerate(tqdm(online_session_train_loader)):
+            images = images.cuda(non_blocking=True) # shape: (batch_size*2, 3, 224, 224)
+            # Pass features through base model and then additional learnable transform (linear layer)
+            feats = model[0](images)   # backbone
+            feats = torch.nn.functional.normalize(feats, dim=-1)
+            all_feats.append(feats.cpu().numpy())
+
+    # -----------------------
+    # K-MEANS
+    # -----------------------
+    print('Fitting K-Means...')
+    all_feats = np.concatenate(all_feats)
+    kmeans = KMeans(n_clusters=args.num_labeled_classes+args.num_cur_novel_classes, random_state=0).fit(all_feats)
+    #preds = kmeans.labels_
+    centroids_np = kmeans.cluster_centers_   # (60, 768)
+    print('Done!')
+
+    centroids = torch.from_numpy(centroids_np).to(device)
+    centroids = torch.nn.functional.normalize(centroids, dim=-1)   # torch.Size([60, 768])
+    #centroids = centroids.float()
+    with torch.no_grad():
+        """
+        model[1]内部的last_layer计算质心向量与已知类别原型间的余弦相似度
+        这产生logits张量，表示每个质心属于已知类别的可能性
+        """
+        _, logits = model[1](centroids)   # torch.Size([60, 50]) 从50个已知类分类头去预测60个类（新来了10个）它利用了旧模型的"无知"来识别新类！
+        max_logits, _ = torch.max(logits, dim=-1)   # torch.Size([60])
+        _, proto_idx = torch.topk(max_logits, k=args.num_novel_class_per_session, largest=False)   # torch.Size([10]) 当largest=False时，返回最小的k个元素
+        new_head = centroids[proto_idx]   # torch.Size([10, 768])
+
+    return new_head
+
+def get_kmeans_centroid_for_new_head_clip(clip_model, projector_pre, attention_fusion, online_session_train_loader, args,
                                           device):
     """
     为CLIP特征定制的K-means新头初始化函数
@@ -63,7 +63,7 @@ def get_kmeans_centroid_for_new_head_clip(clip_model, projector_pre, weighted_ga
     Args:
         clip_model: CLIP模型
         projector_pre: 前一个会话的投影头
-        weighted_gamma: 特征融合模块
+        attention_fusion: 特征融合模块
         online_session_train_loader: 在线会话训练数据加载器
         args: 参数
         device: 设备
@@ -75,7 +75,7 @@ def get_kmeans_centroid_for_new_head_clip(clip_model, projector_pre, weighted_ga
     # 设置模型为eval模式
     clip_model.eval()
     projector_pre.eval()
-    weighted_gamma.eval()
+    # attention_fusion.eval()
 
     all_feats = []
 
@@ -95,7 +95,7 @@ def get_kmeans_centroid_for_new_head_clip(clip_model, projector_pre, weighted_ga
             all_txt_feats = all_txt_feats.float()
 
             # 通过weighted_gamma融合图像和文本特征
-            fusion_feats = weighted_gamma(all_img_feats, all_txt_feats)
+            fusion_feats = attention_fusion(all_img_feats, all_txt_feats)
 
             # 归一化特征
             fusion_feats = torch.nn.functional.normalize(fusion_feats, dim=-1)

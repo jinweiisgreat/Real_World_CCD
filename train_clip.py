@@ -21,6 +21,7 @@ from data.get_datasets import get_class_splits, ContrastiveLearningViewGenerator
 from models.utils_simgcd import DINOHead, get_params_groups, SupConLoss, info_nce_logits, DistillLoss
 from models.utils_simgcd_pro import get_kmeans_centroid_for_new_head_clip
 from models.utils_proto_aug_clip import ProtoAugManager
+from model_utils import CrossAttentionFusion
 
 from config import exp_root
 from collections import Counter
@@ -37,18 +38,28 @@ import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
+# def get_session_lr(base_lr, session):
+#     """根据session编号返回对应的学习率"""
+#     lr_schedule = {
+#         0: base_lr,     # session 1: 0.1
+#         1: base_lr * 0.5,     # session 2: 0.05
+#         2: base_lr * 0.25,    # session 3: 0.025
+#         3: base_lr * 0.125,   # session 4: 0.0125
+#         4: base_lr * 0.125   # session 5: 0.00625
+#     }
+#     return lr_schedule.get(session, base_lr * 0.025)
 
-class WeightedGamma(nn.Module):
-    """用于融合图像和文本特征的加权模块"""
-
-    def __init__(self, args):
-        super().__init__()
-        self.gamma = nn.Parameter(torch.tensor(0.5))  # 可学习参数
-
-    def forward(self, img_feats, txt_feats):
-        # 融合图像和文本特征
-        fusion_feat = self.gamma * img_feats + (1 - self.gamma) * txt_feats
-        return F.normalize(fusion_feat, dim=-1)
+# class WeightedGamma(nn.Module):
+#     """用于融合图像和文本特征的加权模块"""
+#
+#     def __init__(self, args):
+#         super().__init__()
+#         self.gamma = nn.Parameter(torch.tensor(0.5))  # 可学习参数
+#
+#     def forward(self, img_feats, txt_feats):
+#         # 融合图像和文本特征
+#         fusion_feat = self.gamma * img_feats + (1 - self.gamma) * txt_feats
+#         return F.normalize(fusion_feat, dim=-1)
 
 def change_need_grad(model, optim_params=None):
     """用于根据参数名，修改CLIP的image encoder中的参数"是否要回传梯度"""
@@ -73,13 +84,13 @@ def get_optim_params(model_name: str):
             'visual.transformer.resblocks.23.ln_2.weight',
             'visual.transformer.resblocks.23.ln_2.bias']
 
-def get_clip_features_and_fusion(clip_model, weighted_gamma, images):
+def get_clip_features_and_fusion(clip_model, attention_fusion, images):
     """获取CLIP特征并进行融合"""
     # 移除torch.no_grad()，允许梯度回传
     all_img_feats, all_txt_feats = clip_model(images)
     all_img_feats = all_img_feats.float()
     all_txt_feats = all_txt_feats.float()
-    fusion_feat = weighted_gamma(all_img_feats, all_txt_feats)
+    fusion_feat = attention_fusion(all_img_feats, all_txt_feats)
     return fusion_feat
 
 
@@ -87,12 +98,12 @@ def get_clip_features_and_fusion(clip_model, weighted_gamma, images):
 '''====================================================================================================================='''
 
 
-def train_offline_clip(clip_model, projector, weighted_gamma, train_loader, test_loader, args):
+def train_offline_clip(clip_model, projector, attention_fusion, train_loader, test_loader, args):
     """离线训练阶段 - 使用CLIP特征，与clip_simgcd保持一致"""
 
-    # 设置优化器 - 包含projector和weighted_gamma的参数
+    # 设置优化器
     clip_trainable_params = [p for p in clip_model.parameters() if p.requires_grad]
-    optimizer = SGD(list(projector.parameters()) + list(weighted_gamma.parameters()) + clip_trainable_params,
+    optimizer = SGD(list(projector.parameters()) + clip_trainable_params + list(attention_fusion.parameters()),
                     lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
 
     exp_lr_scheduler = lr_scheduler.CosineAnnealingLR(
@@ -124,8 +135,8 @@ def train_offline_clip(clip_model, projector, weighted_gamma, train_loader, test
             class_labels, mask_lab = class_labels.cuda(non_blocking=True), mask_lab.cuda(non_blocking=True).bool()
 
             # 处理两个视图
-            fusion_feat_view1 = get_clip_features_and_fusion(clip_model, weighted_gamma, images[0].cuda())
-            fusion_feat_view2 = get_clip_features_and_fusion(clip_model, weighted_gamma, images[1].cuda())
+            fusion_feat_view1 = get_clip_features_and_fusion(clip_model, attention_fusion, images[0].cuda())
+            fusion_feat_view2 = get_clip_features_and_fusion(clip_model, attention_fusion, images[1].cuda())
             fusion_feat = torch.cat([fusion_feat_view1, fusion_feat_view2], dim=0)
 
             # 通过投影头
@@ -164,7 +175,6 @@ def train_offline_clip(clip_model, projector, weighted_gamma, train_loader, test
             pstr += f'cluster_loss: {cluster_loss.item():.4f} '
             pstr += f'sup_con_loss: {sup_con_loss.item():.4f} '
             pstr += f'contrastive_loss: {contrastive_loss.item():.4f} '
-            pstr += f'gamma: {weighted_gamma.gamma.item():.4f} '
 
             loss_record.update(loss.item(), class_labels.size(0))
             optimizer.zero_grad()
@@ -175,31 +185,32 @@ def train_offline_clip(clip_model, projector, weighted_gamma, train_loader, test
                 args.logger.info('Epoch: [{}][{}/{}]\t loss {:.5f}\t {}'
                                  .format(epoch, batch_idx, len(train_loader), loss.item(), pstr))
 
-        args.logger.info('Train Epoch: {} Avg Loss: {:.4f} lr: {:.4f} gamma: {:.4f}'.format(
-            epoch, loss_record.avg, exp_lr_scheduler.get_lr()[0], weighted_gamma.gamma.item()))
+        args.logger.info('Train Epoch: {} Avg Loss: {:.4f} lr: {:.4f}'.format(
+            epoch, loss_record.avg, exp_lr_scheduler.get_lr()[0]))
 
         # 超过warm_up_epoch后开始测试
-        if epoch >= args.warm_up_epoch:
-            args.logger.info('Testing on disjoint test set...')
-            all_acc_test, old_acc_test, _ = test_offline_clip(clip_model, projector, weighted_gamma,
-                                                              test_loader, epoch=epoch, save_name='Test ACC', args=args)
-            args.logger.info('Test Accuracies: All {:.4f} | Old {:.4f}'.format(all_acc_test, old_acc_test))
+        args.logger.info('Testing on disjoint test set...')
+        all_acc_test, old_acc_test, _ = test_offline_clip(clip_model, projector, attention_fusion,
+                                                          test_loader, epoch=epoch, save_name='Test ACC', args=args)
+        args.logger.info('Test Accuracies: All {:.4f} | Old {:.4f}'.format(all_acc_test, old_acc_test))
 
-            save_dict = {
-                'projector': projector.state_dict(),
-                'weighted_gamma': weighted_gamma.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'epoch': epoch + 1,
-            }
+        save_dict = {
+            'model': clip_model.state_dict(),
+            # 'projector': projector.state_dict(),
+            'fusion': attention_fusion.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'epoch': epoch + 1,
+        }
 
-            torch.save(save_dict, args.model_path)
-            args.logger.info("model saved to {}.".format(args.model_path))
+        torch.save(save_dict, args.model_path)
+        args.logger.info("model saved to {}.".format(args.model_path))
 
-            if old_acc_test > best_test_acc_old:
-                args.logger.info(f'Best ACC on Old Classes on test set: {old_acc_test:.4f}...')
-                torch.save(save_dict, args.model_path[:-3] + f'_best.pt')
-                args.logger.info("model saved to {}.".format(args.model_path[:-3] + f'_best.pt'))
-                best_test_acc_old = old_acc_test
+        if old_acc_test > best_test_acc_old:
+            args.logger.info(f'Best ACC on Old Classes on test set: {old_acc_test:.4f}...')
+            torch.save(save_dict, args.model_path[:-3] + f'_best.pt')
+            args.logger.info("model saved to {}.".format(args.model_path[:-3] + f'_best.pt'))
+            best_test_acc_old = old_acc_test
+
 
         exp_lr_scheduler.step()
 
@@ -208,11 +219,11 @@ def train_offline_clip(clip_model, projector, weighted_gamma, train_loader, test
         args.logger.info('\n')
 
 
-def test_offline_clip(clip_model, projector, weighted_gamma, test_loader, epoch, save_name, args):
+def test_offline_clip(clip_model, projector, attention_fusion, test_loader, epoch, save_name, args):
     """离线测试函数"""
     clip_model.eval()
     projector.eval()
-    weighted_gamma.eval()
+    attention_fusion.eval()
 
     preds, targets = [], []
     mask = np.array([])
@@ -221,7 +232,7 @@ def test_offline_clip(clip_model, projector, weighted_gamma, test_loader, epoch,
         images = images.cuda(non_blocking=True)
 
         # 获取CLIP融合特征
-        fusion_feat = get_clip_features_and_fusion(clip_model, weighted_gamma, images)
+        fusion_feat = get_clip_features_and_fusion(clip_model, attention_fusion, images)
 
         with torch.no_grad():
             _, logits = projector(fusion_feat.float())
@@ -244,19 +255,20 @@ def test_offline_clip(clip_model, projector, weighted_gamma, test_loader, epoch,
 '''====================================================================================================================='''
 
 
-def train_online_clip(clip_model, projector_cur, projector_pre, weighted_gamma, proto_aug_manager,
+def train_online_clip(clip_model, projector_cur, projector_pre, attention_fusion, proto_aug_manager,
                       train_loader, test_loader, current_session, args):
     """在线训练阶段 - 使用CLIP特征"""
 
     # 设置优化器
+    # session_lr = get_session_lr(args.lr, current_session - 1)
     clip_trainable_params = [p for p in clip_model.parameters() if p.requires_grad]
-    optimizer = SGD(list(projector_cur.parameters()) + list(weighted_gamma.parameters()) + clip_trainable_params,
+    optimizer = SGD(list(projector_cur.parameters()) + clip_trainable_params + list(attention_fusion.parameters()),
                     lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
 
     exp_lr_scheduler = lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=args.epochs_online_per_session,
-        eta_min=args.lr * 1e-3,
+        eta_min=args.lr * 1e-4,
     )
 
     cluster_criterion = DistillLoss(
@@ -277,10 +289,9 @@ def train_online_clip(clip_model, projector_cur, projector_pre, weighted_gamma, 
     for epoch in range(args.epochs_online_per_session):
         loss_record = AverageMeter()
 
-        clip_model.eval()  # CLIP保持eval模式
+        clip_model.train()
         projector_cur.train()
         projector_pre.eval()
-        weighted_gamma.train()
 
         for batch_idx, batch in enumerate(train_loader):
             images, class_labels, uq_idxs, _ = batch
@@ -289,8 +300,8 @@ def train_online_clip(clip_model, projector_cur, projector_pre, weighted_gamma, 
             class_labels, mask_lab = class_labels.cuda(non_blocking=True), mask_lab.cuda(non_blocking=True).bool()
 
             # 处理两个视图
-            fusion_feat_view1 = get_clip_features_and_fusion(clip_model, weighted_gamma, images[0].cuda())
-            fusion_feat_view2 = get_clip_features_and_fusion(clip_model, weighted_gamma, images[1].cuda())
+            fusion_feat_view1 = get_clip_features_and_fusion(clip_model, attention_fusion, images[0].cuda())
+            fusion_feat_view2 = get_clip_features_and_fusion(clip_model, attention_fusion, images[1].cuda())
             fusion_feat = torch.cat([fusion_feat_view1, fusion_feat_view2], dim=0)
 
             # 通过当前投影头
@@ -356,7 +367,6 @@ def train_online_clip(clip_model, projector_cur, projector_pre, weighted_gamma, 
             pstr += f'contrastive_loss: {contrastive_loss.item():.4f} '
             pstr += f'proto_aug_loss: {proto_aug_loss.item():.4f} '
             pstr += f'feat_distill_loss: {feat_distill_loss.item():.4f} '
-            pstr += f'gamma: {weighted_gamma.gamma.item():.4f} '
 
             loss_record.update(loss.item(), class_labels.size(0))
             optimizer.zero_grad()
@@ -378,7 +388,7 @@ def train_online_clip(clip_model, projector_cur, projector_pre, weighted_gamma, 
         args.logger.info('Testing on disjoint test set...')
         all_acc_test, old_acc_test, new_acc_test, \
             all_acc_soft_test, seen_acc_test, unseen_acc_test = test_online_clip(clip_model, projector_cur,
-                                                                                 weighted_gamma,
+                                                                                 attention_fusion,
                                                                                  test_loader, epoch=epoch,
                                                                                  save_name='Test ACC', args=args)
         args.logger.info(
@@ -391,8 +401,9 @@ def train_online_clip(clip_model, projector_cur, projector_pre, weighted_gamma, 
         exp_lr_scheduler.step()
 
         save_dict = {
-            'projector': projector_cur.state_dict(),
-            'weighted_gamma': weighted_gamma.state_dict(),
+            'model': clip_model.state_dict(),
+            # 'projector': projector_cur.state_dict(),
+            'fusion': attention_fusion.state_dict(),
             'optimizer': optimizer.state_dict(),
             'epoch': epoch + 1,
         }
@@ -427,11 +438,11 @@ def train_online_clip(clip_model, projector_cur, projector_pre, weighted_gamma, 
     args.best_test_acc_unseen_list.append(best_test_acc_unseen)
 
 
-def test_online_clip(clip_model, projector, weighted_gamma, test_loader, epoch, save_name, args):
+def test_online_clip(clip_model, projector, attention_fusion, test_loader, epoch, save_name, args):
     """在线测试函数，使用CLIP特征"""
     clip_model.eval()
     projector.eval()
-    weighted_gamma.eval()
+    attention_fusion.eval()
 
     preds, targets = [], []
     mask_hard = np.array([])
@@ -446,7 +457,7 @@ def test_online_clip(clip_model, projector, weighted_gamma, test_loader, epoch, 
         images = images.cuda(non_blocking=True)
 
         # 获取CLIP融合特征
-        fusion_feat = get_clip_features_and_fusion(clip_model, weighted_gamma, images)
+        fusion_feat = get_clip_features_and_fusion(clip_model, attention_fusion, images)
 
         with torch.no_grad():
             _, logits = projector(fusion_feat.float())
@@ -622,8 +633,7 @@ if __name__ == "__main__":
     args.logger.info('CLIP model loaded with last layer trainable')
 
     # 创建特征融合模块
-    weighted_gamma = WeightedGamma(args).cuda()
-
+    attention_fusion = CrossAttentionFusion(feature_dim=768, hidden_dim=256).cuda()
     # ----------------------
     # 模型配置
     # ----------------------
@@ -678,7 +688,7 @@ if __name__ == "__main__":
         # ----------------------
         # TRAIN
         # ----------------------
-        train_offline_clip(clip_model, projector, weighted_gamma, offline_session_train_loader,
+        train_offline_clip(clip_model, projector, attention_fusion, offline_session_train_loader,
                            offline_session_test_loader, args)
 
     # ----------------------
@@ -715,33 +725,6 @@ if __name__ == "__main__":
         proto_aug_manager = ProtoAugManager(args.feat_dim, args.n_views * args.batch_size,
                                             args.hardness_temp, args.radius_scale, device, args.logger)
 
-
-        # 为ProtoAug Manager添加CLIP支持的方法
-        def compute_proto_aug_hardness_aware_loss_clip(self, projector):
-            """为CLIP特征定制的ProtoAug损失计算"""
-            prototypes = F.normalize(self.prototypes, dim=-1, p=2).to(self.device)
-
-            # 难度感知采样
-            sampling_prob = F.softmax(self.mean_similarity / self.hardness_temp, dim=-1)
-            sampling_prob = sampling_prob.cpu().numpy()
-            prototypes_labels = np.random.choice(len(prototypes), size=(self.batch_size,), replace=True,
-                                                 p=sampling_prob)
-            prototypes_labels = torch.from_numpy(prototypes_labels).long().to(self.device)
-
-            prototypes_sampled = prototypes[prototypes_labels]
-            prototypes_augmented = prototypes_sampled + torch.randn((self.batch_size, self.feature_dim),
-                                                                    device=self.device) * self.radius * self.radius_scale
-
-            # 通过投影头获取logits
-            _, prototypes_output = projector(prototypes_augmented)
-            proto_aug_loss = nn.CrossEntropyLoss()(prototypes_output / 0.1, prototypes_labels)
-
-            return proto_aug_loss
-
-
-        # 绑定新方法到proto_aug_manager
-        proto_aug_manager.compute_proto_aug_hardness_aware_loss_clip = compute_proto_aug_hardness_aware_loss_clip.__get__(
-            proto_aug_manager, ProtoAugManager)
 
         # 最佳测试准确率列表
         args.best_test_acc_all_list = []
@@ -803,8 +786,9 @@ if __name__ == "__main__":
                                                    'checkpoints', 'model_best.pt')
                     args.logger.info('loading offline checkpoints from: ' + load_dir_online)
                     load_dict = torch.load(load_dir_online)
-                    projector_pre.load_state_dict(load_dict['projector'])
-                    weighted_gamma.load_state_dict(load_dict['weighted_gamma'])
+                    clip_model.load_state_dict(load_dict['model'])
+                    # projector_pre.load_state_dict(load_dict['projector'])
+                    attention_fusion.load_state_dict(load_dict['fusion'])
                     args.logger.info('successfully loaded checkpoints!')
             else:
                 projector_pre = DINOHead(in_dim=args.feat_dim, out_dim=args.num_seen_classes,
@@ -813,8 +797,9 @@ if __name__ == "__main__":
                 load_dir_online = args.model_path[:-3] + '_session-' + str(session) + f'_best.pt'
                 args.logger.info('loading checkpoints from last online session: ' + load_dir_online)
                 load_dict = torch.load(load_dir_online)
-                projector_pre.load_state_dict(load_dict['projector'])
-                weighted_gamma.load_state_dict(load_dict['weighted_gamma'])
+                clip_model.load_state_dict(load_dict['model'])
+                attention_fusion.load_state_dict(load_dict['fusion'])
+                # projector_pre.load_state_dict(load_dict['projector'])
                 args.logger.info('successfully loaded checkpoints!')
 
             # 增量分类器
@@ -844,7 +829,7 @@ if __name__ == "__main__":
             if args.init_new_head:
                 # 创建用于K-means初始化的临时模型
                 new_head = get_kmeans_centroid_for_new_head_clip(
-                    clip_model, projector_pre, weighted_gamma,
+                    clip_model, projector_pre, attention_fusion,
                     online_session_train_loader_for_new_head_init, args, device)
 
                 norm_new_head_weight_v = torch.norm(projector_cur.last_layer.weight_v.data[args.num_seen_classes:],
@@ -868,12 +853,7 @@ if __name__ == "__main__":
                                                                         num_workers=args.num_workers_test,
                                                                         batch_size=256, shuffle=False, pin_memory=False)
 
-                # 创建用于原型计算的临时模型
-                temp_model_for_proto = lambda images: (get_clip_features_and_fusion(clip_model, weighted_gamma, images),
-                                                       projector_pre(
-                                                           get_clip_features_and_fusion(clip_model, weighted_gamma,
-                                                                                        images)))
-                proto_aug_manager.update_prototypes_offline_clip(temp_model_for_proto,
+                proto_aug_manager.update_prototypes_offline_clip(clip_model,attention_fusion,
                                                                  offline_session_train_loader_for_proto_aug,
                                                                  args.num_labeled_classes)
                 save_path = os.path.join(args.model_dir, 'ProtoAugDict' + '_offline' + f'.pt')
@@ -883,7 +863,7 @@ if __name__ == "__main__":
             # ----------------------
             # TRAIN
             # ----------------------
-            train_online_clip(clip_model, projector_cur, projector_pre, weighted_gamma, proto_aug_manager,
+            train_online_clip(clip_model, projector_cur, projector_pre, attention_fusion, proto_aug_manager,
                               online_session_train_loader, online_session_test_loader, session + 1, args)
 
             # 训练后更新在线原型
@@ -894,17 +874,17 @@ if __name__ == "__main__":
             load_dir_online_best = args.model_path[:-3] + '_session-' + str(session + 1) + f'_best.pt'
             args.logger.info('loading best checkpoints current online session: ' + load_dir_online_best)
             load_dict = torch.load(load_dir_online_best)
-            projector_cur.load_state_dict(load_dict['projector'])
-            weighted_gamma.load_state_dict(load_dict['weighted_gamma'])
+            # projector_cur.load_state_dict(load_dict['projector'])
+            # weighted_gamma.load_state_dict(load_dict['weighted_gamma'])
 
             # 创建用于原型更新的临时模型
-            temp_model_for_proto_update = lambda images: (
-                get_clip_features_and_fusion(clip_model, weighted_gamma, images),
-                projector_cur(get_clip_features_and_fusion(clip_model, weighted_gamma, images)))
-            proto_aug_manager.update_prototypes_online_clip(temp_model_for_proto_update,
-                                                            online_session_train_loader_for_new_head_init,
-                                                            args.num_seen_classes,
-                                                            args.num_labeled_classes + args.num_cur_novel_classes)
+            proto_aug_manager.update_prototypes_online_clip(
+                clip_model, projector_cur, attention_fusion,
+                online_session_train_loader_for_new_head_init,
+                args.num_seen_classes,
+                args.num_labeled_classes + args.num_cur_novel_classes
+            )
+
             save_path = os.path.join(args.model_dir, 'ProtoAugDict' + '_session-' + str(session + 1) + f'.pt')
             args.logger.info('Saving ProtoAugDict to {}.'.format(save_path))
             proto_aug_manager.save_proto_aug_dict(save_path)

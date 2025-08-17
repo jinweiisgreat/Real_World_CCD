@@ -8,14 +8,15 @@ CUDA_VISIBLE_DEVICES=0 python train_clip.py \
     --dataset_name 'cifar100' \
     --batch_size 128 \
     --transform 'imagenet' \
-    --lr 0.1 \
-    --memax_weight 1 \
+    --lr 0.01 \
+    --memax_weight 10 \
     --eval_funcs 'v2' \
-    --num_old_classes 50 \
+    --num_old_classes 70 \
     --prop_train_labels 0.8 \
     --train_session offline \
-    --epochs_offline 100 \
-    --continual_session_num 5 \
+    --warmup_teacher_temp_epochs 1 \
+    --epochs_offline 50 \
+    --continual_session_num 3 \
     --online_novel_unseen_num 400 \
     --online_old_seen_num 25 \
     --online_novel_seen_num 25
