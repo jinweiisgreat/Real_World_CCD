@@ -628,7 +628,7 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
                     backbone=deepcopy(backbone),
                     projector=deepcopy(projector_cur),
                     prompt_pool=args.prompt_pool,
-                    top_k=5
+                    top_k=3
                 )
                 temp_enhanced_model.load_state_dict(state_dict)
                 temp_enhanced_model = temp_enhanced_model.to(device)
@@ -961,7 +961,7 @@ if __name__ == "__main__":
         backbone=backbone,
         projector=projector,
         prompt_pool=args.prompt_pool,
-        top_k=5,
+        top_k=3,
         enable_prompt_training=args.enable_prompt_training
     )
 
@@ -1119,7 +1119,7 @@ if __name__ == "__main__":
                     backbone=deepcopy(backbone),
                     projector=projector_pre,
                     prompt_pool=args.prompt_pool,
-                    top_k=5,
+                    top_k=3,
                     enable_prompt_training=args.enable_prompt_training
                 )
                 if args.load_offline_id is not None:
@@ -1147,7 +1147,7 @@ if __name__ == "__main__":
                     backbone=deepcopy(backbone),
                     projector=projector_pre,
                     prompt_pool=args.prompt_pool,
-                    top_k=5,
+                    top_k=3,
                     enable_prompt_training=args.enable_prompt_training
                 )
                 load_dir_online = args.model_path[:-3] + '_session-' + str(session) + f'_best.pt'
@@ -1205,7 +1205,7 @@ if __name__ == "__main__":
                 backbone=backbone_cur,
                 projector=projector_cur,
                 prompt_pool=args.prompt_pool,
-                top_k=5,
+                top_k=3,
                 enable_prompt_training=args.enable_prompt_training
             )
 

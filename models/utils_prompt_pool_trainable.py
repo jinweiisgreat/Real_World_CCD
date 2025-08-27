@@ -390,20 +390,8 @@ class LearnablePromptPool(nn.Module):
             print(f"Created usage statistics tracker on device {self.device}")
         else:
             print("No initial prompts provided, skipping initialization")
-
+    """
     def forward(self, features, top_k=5, return_attention=False):
-        """
-        Forward pass for learnable prompt pool with dual-view support
-
-        Args:
-            features: Input features [B*n_views, D]
-            top_k: Number of top prompts to use
-            return_attention: Whether to return attention weights
-
-        Returns:
-            enhanced_features: Enhanced features [B*n_views, D]
-            attention_info: (optional) Attention weights and related info
-        """
         if self.prompt_keys is None or self.num_prompts == 0:
             if return_attention:
                 return features, None
@@ -417,6 +405,7 @@ class LearnablePromptPool(nn.Module):
 
         # 相似度矩阵 [B*n_views, num_prompts]
         similarity = features_norm @ keys_norm.T
+        
 
         # 选择top-k个最相似的prompts
         top_k = min(top_k, self.num_prompts)
@@ -492,6 +481,121 @@ class LearnablePromptPool(nn.Module):
                 'enhanced_features': enhanced_features,
                 'features_norm': features_norm,  # 保存归一化的特征
                 'multi_head_attention': attn_weights.mean(dim=1).squeeze(1),  # [B*n_views, top_k]
+            }
+
+        return enhanced_features, attention_info
+    """
+
+
+    def forward(self, features, top_k=3, return_attention=False, similarity_threshold=0.7):
+        """
+        Forward with similarity gating:
+        仅当样本与任一prompt的最大相似度 > similarity_threshold 时执行增强
+        否则该样本直接返回原特征
+        """
+        if self.prompt_keys is None or self.num_prompts == 0:
+            return (features, None) if return_attention else features
+
+        device = features.device
+        B_total = features.size(0)
+
+        # 归一化 & 计算相似度
+        features_norm = F.normalize(features, dim=1)
+        keys_norm = F.normalize(self.prompt_keys, dim=1)
+        similarity = features_norm @ keys_norm.T  # [B, num_prompts]
+        max_sim, _ = similarity.max(dim=1)  # [B]
+
+        # 筛选需要增强的样本
+        enhance_mask = max_sim > similarity_threshold
+        if not enhance_mask.any():
+            # 没有样本满足阈值
+            if return_attention:
+                top_k_used = min(top_k, self.num_prompts)
+                attention_info = {
+                    'attention_weights': torch.zeros(B_total, top_k_used, device=device),
+                    'selected_prompt_indices': torch.full((B_total, top_k_used), -1, device=device, dtype=torch.long),
+                    'top_k_similarities': torch.zeros(B_total, top_k_used, device=device),
+                    'enhanced_features': features,
+                    'features_norm': features_norm,
+                    'multi_head_attention': torch.zeros(B_total, top_k_used, device=device)
+                }
+                return features, attention_info
+            return features
+
+        enhance_indices = enhance_mask.nonzero(as_tuple=False).squeeze(1)
+        no_enhance_indices = (~enhance_mask).nonzero(as_tuple=False).squeeze(1)
+
+        # 需要增强的子集
+        feat_sub = features[enhance_indices]
+        feat_sub_norm = features_norm[enhance_indices]
+        sim_sub = similarity[enhance_indices]
+
+        top_k_used = min(top_k, self.num_prompts)
+        top_k_vals, top_k_idx = torch.topk(sim_sub, top_k_used, dim=1)
+
+        # 使用统计（仅记录被增强样本）
+        if hasattr(self, 'prompt_usage_stats'):
+            if self.prompt_usage_stats.device != device:
+                self.prompt_usage_stats = self.prompt_usage_stats.to(device)
+            usage_increment = torch.zeros(self.num_prompts, device=device, dtype=torch.float)
+            # 统计
+            flat_indices = top_k_idx.flatten()
+            usage_increment.index_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float))
+            self.prompt_usage_stats = self.prompt_usage_stats + usage_increment
+
+        # 注意力（温度可调）
+        attn_weights_gate = F.softmax(top_k_vals / 0.05, dim=1)
+
+        selected_values = self.prompt_values[top_k_idx]  # [M, top_k_used, D]
+        feat_sub_reshaped = feat_sub.unsqueeze(1)  # [M, 1, D]
+
+        # 线性投影
+        q = self.query_proj(feat_sub_reshaped)  # [M, 1, D]
+        k = self.key_proj(selected_values)  # [M, top_k_used, D]
+        v = self.value_proj(selected_values)  # [M, top_k_used, D]
+
+        M, q_len, d_model = q.size()
+        _, k_len, _ = k.size()
+
+        q = q.view(M, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(M, k_len, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(M, k_len, self.num_heads, self.head_dim).transpose(1, 2)
+
+        scores = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim ** 0.5)  # [M, H, 1, top_k_used]
+        attn_multi = F.softmax(scores, dim=-1)
+        context = torch.matmul(attn_multi, v)  # [M, H, 1, head_dim]
+        context = context.transpose(1, 2).contiguous().view(M, q_len, d_model)
+        context = self.output_proj(context)
+        sub_enhanced = self.norm2(self.norm1(feat_sub_reshaped + context)).squeeze(1)  # [M, D]
+
+        # 汇总
+        enhanced_features = features.clone()
+        enhanced_features[enhance_indices] = sub_enhanced
+        # 未增强样本保持原特征
+
+        attention_info = None
+        if return_attention:
+            # 初始化占位
+            attn_weights_full = torch.zeros(B_total, top_k_used, device=device)
+            topk_indices_full = torch.full((B_total, top_k_used), -1, device=device, dtype=torch.long)
+            topk_sims_full = torch.zeros(B_total, top_k_used, device=device)
+            multi_head_avg_full = torch.zeros(B_total, top_k_used, device=device)
+
+            # 填充增强样本
+            attn_weights_full[enhance_indices] = attn_weights_gate
+            topk_indices_full[enhance_indices] = top_k_idx
+            topk_sims_full[enhance_indices] = top_k_vals
+            # 多头平均 (attn_multi: [M,H,1,top_k_used])
+            multi_head_avg_full[enhance_indices] = attn_multi.mean(dim=1).squeeze(1)
+
+            attention_info = {
+                'attention_weights': attn_weights_full,
+                'selected_prompt_indices': topk_indices_full,
+                'top_k_similarities': topk_sims_full,
+                'enhanced_features': enhanced_features,
+                'features_norm': features_norm,
+                'multi_head_attention': multi_head_avg_full,
+                'enhance_mask': enhance_mask
             }
 
         return enhanced_features, attention_info
@@ -860,7 +964,7 @@ class LearnablePromptPool(nn.Module):
         self.max_prompts = prompt_pool_dict.get('max_prompts', 200)
         self.similarity_threshold = prompt_pool_dict.get('similarity_threshold', 0.6)
 
-    def enhance_features(self, features, top_k=5):
+    def enhance_features(self, features, top_k=3):
         """向后兼容的接口"""
         return self.forward(features, top_k=top_k, return_attention=False)
 

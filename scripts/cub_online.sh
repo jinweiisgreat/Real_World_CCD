@@ -4,14 +4,14 @@
 set -e
 set -x
 
-CUDA_VISIBLE_DEVICES=0 python train_with_prompts.py \
-    --dataset_name 'cifar100' \
+CUDA_VISIBLE_DEVICES=0 python train_happy.py \
+    --dataset_name 'cub' \
     --batch_size 128 \
     --transform 'imagenet' \
     --warmup_teacher_temp 0.05 \
     --teacher_temp 0.05 \
     --warmup_teacher_temp_epochs 10\
-    --lr 0.01 \
+    --lr 0.1 \
     --memax_old_new_weight 1 \
     --memax_old_in_weight 1 \
     --memax_new_in_weight 1 \
@@ -20,21 +20,17 @@ CUDA_VISIBLE_DEVICES=0 python train_with_prompts.py \
     --radius_scale 1.0 \
     --hardness_temp 0.1 \
     --eval_funcs 'v2' \
-    --num_old_classes 50 \
+    --num_old_classes 100 \
     --prop_train_labels 0.8 \
     --train_session online \
-    --epochs_online_per_session 30 \
+    --epochs_online_per_session 20 \
     --continual_session_num 5 \
-    --online_novel_unseen_num 400 \
-    --online_old_seen_num 25 \
-    --online_novel_seen_num 25 \
+    --online_novel_unseen_num 25 \
+    --online_old_seen_num 5 \
+    --online_novel_seen_num 5 \
     --init_new_head \
-    --prompts_pool_path '/home/ps/_jinwei/Happy-CGCD/prompts_pools/cifar100_thresh0.8_20250819_154139/prompts_pool.pkl' \
-    --load_offline_id Old50_Ratio0.8_20250527-153553 \
+    --load_offline_id Old100_Ratio0.8_20250826-224426 \
     --shuffle_classes \
     --seed 0
-#    --load_offline_id Old50_Ratio0.8_20250605-203249 \
-#    --prompt_pool \
-#    --enable_prompt_training
 
 

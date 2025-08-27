@@ -11,7 +11,7 @@ import torch.nn.functional as F
 
 
 class PromptEnhancedModel(nn.Module):
-    def __init__(self, backbone, projector, prompt_pool=None, top_k=5, enable_prompt_training=True):
+    def __init__(self, backbone, projector, prompt_pool=None, top_k=3, enable_prompt_training=True):
         super().__init__()
         self.backbone = backbone
         self.projector = projector

@@ -198,10 +198,10 @@ def get_class_splits(args):
             args.train_classes = range(100)
             args.unlabeled_classes = range(100, 200)
 
-        if args.num_old_classes > 0:
-            full_classes = args.train_classes + args.unlabeled_classes
-            args.train_classes = full_classes[:args.num_old_classes]
-            args.unlabeled_classes = full_classes[args.num_old_classes:]
+        # if args.num_old_classes > 0:
+        #     full_classes = args.train_classes + args.unlabeled_classes
+        #     args.train_classes = full_classes[:args.num_old_classes]
+        #     args.unlabeled_classes = full_classes[args.num_old_classes:]
 
 
     elif args.dataset_name == 'scars':

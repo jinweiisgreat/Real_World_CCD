@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pickle
 import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
 
 
 class PromptsEnhancer(nn.Module):
@@ -10,11 +11,13 @@ class PromptsEnhancer(nn.Module):
     简洁的Prompts增强器，用于加载预训练的prompts pool并进行特征增强
     """
 
-    def __init__(self, feature_dim, max_prompts=200, device='cuda'):
+    def __init__(self, feature_dim, max_prompts=200, top_k=3, similarity_threshold=0.65, device='cuda'):
         super(PromptsEnhancer, self).__init__()
 
         self.feature_dim = feature_dim
         self.max_prompts = max_prompts
+        self.top_k = top_k
+        self.similarity_threshold = similarity_threshold
         self.device = device
         self.num_prompts = 0
 
@@ -81,10 +84,18 @@ class PromptsEnhancer(nn.Module):
                 initial_prompts[:self.num_prompts].clone().detach()
             )
 
+            # self.prompt_keys = nn.Parameter(
+            #     torch.randn(self.num_prompts, self.feature_dim, device=self.device)
+            # )
+
             # Value：专门用于特征增强
             self.prompt_values = nn.Parameter(
                 initial_prompts[:self.num_prompts].clone().detach()
             )
+
+            # self.prompt_values = nn.Parameter(
+            #     torch.randn(self.num_prompts, self.feature_dim, device=self.device)
+            # )
 
             # 初始化使用统计
             self.prompt_usage_stats = torch.zeros(
@@ -99,13 +110,12 @@ class PromptsEnhancer(nn.Module):
         else:
             print("No initial prompts provided, skipping initialization")
 
-    def forward(self, features, top_k=5):
+    def forward(self, features):
         """
         前向传播：使用prompts增强特征
 
         Args:
             features: 输入特征 [B, D] 或 [2*B, D]
-            top_k: 使用top-k个最相似的prompts
 
         Returns:
             enhanced_features: 增强后的特征 [B, D] 或 [2*B, D]
@@ -122,33 +132,81 @@ class PromptsEnhancer(nn.Module):
 
         # 相似度矩阵 [B, num_prompts]
         similarity = features_norm @ keys_norm.T
+        print(similarity.shape)
+        flat_vals, flat_idx = torch.topk(similarity.view(-1), k=5)
+        rows = flat_idx // similarity.size(1)
+        cols = flat_idx % similarity.size(1)
+        print("Global top5 values:", flat_vals)
 
-        # 2. 选择top-k个最相似的prompts
-        top_k = min(top_k, self.num_prompts)
-        top_k_values, top_k_indices = torch.topk(similarity, top_k, dim=1)
+        # 2. 检查是否有prompts超过阈值
+        max_similarity = torch.max(similarity, dim=1)[0]  # [B]
 
-        # 3. 统计使用情况
-        if self.prompt_usage_stats is not None:
-            batch_usage = torch.zeros(self.num_prompts, device=self.device, dtype=torch.float)
-            for indices in top_k_indices:
-                for idx in indices:
-                    batch_usage[idx] += 1
-            self.prompt_usage_stats += batch_usage
 
-        # 4. 计算注意力权重
-        attention_weights = F.softmax(top_k_values / 0.1, dim=1)  # [B, top_k]
+        # 对于每个样本，如果最大相似度都达不到阈值，直接返回原特征
+        no_enhancement_mask = max_similarity < self.similarity_threshold
 
-        # 5. 获取选中的prompt values
-        selected_prompt_values = self.prompt_values[top_k_indices]  # [B, top_k, D]
+        if no_enhancement_mask.all():
+            # 所有样本都达不到阈值，不进行增强
+            return features, None
 
-        # 6. K-Q-V融合
-        enhanced_features = self._kqv_fusion(features, selected_prompt_values, attention_weights)
+        # 3. 对达到阈值的样本进行处理
+        valid_mask = similarity >= self.similarity_threshold  # [B, num_prompts]
 
-        # 7. 准备注意力信息
+        enhanced_features = features.clone()
+        attention_info_list = []
+
+        for i in range(batch_size):
+            if no_enhancement_mask[i]:
+                # 该样本达不到阈值，跳过增强
+                attention_info_list.append(None)
+                continue
+
+            # 找到该样本超过阈值的prompts
+            valid_indices = torch.where(valid_mask[i])[0]
+
+            if len(valid_indices) == 0:
+                attention_info_list.append(None)
+                continue
+
+            # 在有效prompts中选择top-k
+            actual_k = min(self.top_k, len(valid_indices))
+            valid_similarities = similarity[i][valid_indices]
+            _, local_top_indices = torch.topk(valid_similarities, actual_k)
+            final_indices = valid_indices[local_top_indices]
+
+            # 获取选中的相似度和索引
+            selected_similarities = similarity[i][final_indices].unsqueeze(0)  # [1, actual_k]
+            selected_indices = final_indices.unsqueeze(0)  # [1, actual_k]
+
+            # 计算注意力权重
+            attention_weights = F.softmax(selected_similarities / 0.1, dim=1)  # [1, actual_k]
+
+            # 获取选中的prompt values
+            selected_prompt_values = self.prompt_values[final_indices].unsqueeze(0)  # [1, actual_k, D]
+
+            # K-Q-V融合
+            enhanced_feature = self._kqv_fusion(
+                features[i:i + 1], selected_prompt_values, attention_weights
+            )
+            enhanced_features[i] = enhanced_feature.squeeze(0)
+
+            # 记录注意力信息
+            attention_info_list.append({
+                'attention_weights': attention_weights.squeeze(0),
+                'selected_prompt_indices': final_indices,
+                'top_k_similarities': selected_similarities.squeeze(0),
+            })
+
+        # 统计增强情况
+        enhanced_count = (~no_enhancement_mask).sum().item()
+        # print(f"Enhanced {enhanced_count}/{batch_size} samples (threshold: {self.similarity_threshold})")
+
+        # 准备整体注意力信息
         attention_info = {
-            'attention_weights': attention_weights,
-            'selected_prompt_indices': top_k_indices,
-            'top_k_similarities': top_k_values,
+            'enhanced_samples': enhanced_count,
+            'total_samples': batch_size,
+            'enhancement_ratio': enhanced_count / batch_size,
+            'per_sample_info': attention_info_list
         }
 
         return enhanced_features, attention_info
@@ -295,26 +353,27 @@ class PromptsEnhancer(nn.Module):
 
 
 # 使用示例函数
-def create_prompts_enhancer(feature_dim, prompts_pool_path, device='cuda'):
+def create_prompts_enhancer(feature_dim, prompts_pool_path, top_k=3, device='cuda'):
     """
     创建并初始化PromptsEnhancer
 
     Args:
         feature_dim: 特征维度
         prompts_pool_path: prompts pool文件路径
+        top_k : 使用的top-k个最相似的prompts
         device: 计算设备
 
     Returns:
         PromptsEnhancer实例
     """
-    enhancer = PromptsEnhancer(feature_dim=feature_dim, device=device)
+    enhancer = PromptsEnhancer(feature_dim=feature_dim, top_k=top_k, device=device)
 
     # 加载预训练的prompts pool
     success = enhancer.load_prompts_pool(prompts_pool_path)
 
     if success:
         print("PromptsEnhancer created successfully!")
-        print(f"Statistics: {enhancer.get_statistics()}")
+        # print(f"Statistics: {enhancer.get_statistics()}")
     else:
         print("Failed to create PromptsEnhancer with Prepare")
 

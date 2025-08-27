@@ -17,9 +17,9 @@ from data.augmentations import get_transform
 from data.get_datasets import get_class_splits, ContrastiveLearningViewGenerator, get_datasets
 
 from models.utils_simgcd import DINOHead, get_params_groups, SupConLoss, info_nce_logits, DistillLoss
-from models.utils_simgcd_pro import get_kmeans_centroid_for_new_head
-# from models.utils_proto_aug import ProtoAugManager
-from models.utils_proto_aug_prompt_space import ProtoAugSpacingManager
+from models.utils_simgcd_pro_with_prompt import get_kmeans_centroid_for_new_head
+from models.utils_proto_aug_with_prompt import ProtoAugManager
+# from models.utils_proto_aug_prompt_space import ProtoAugSpacingManager
 from models import vision_transformer as vits
 from config import dino_pretrain_path, exp_root
 from collections import Counter
@@ -61,11 +61,7 @@ def forward_with_prompts_enhancement(model, prompts_enhancer, images):
     backbone_features = torch.nn.functional.normalize(backbone_features, dim=-1)
 
     # 2. 使用prompts增强特征
-    if prompts_enhancer is not None:
-        enhanced_features, attention_info = prompts_enhancer(backbone_features, top_k=3)
-    else:
-        enhanced_features = backbone_features
-        attention_info = None
+    enhanced_features, attention_info = prompts_enhancer(backbone_features)
 
     # 3. 通过projector得到最终输出
     student_proj, student_out = model[1](enhanced_features)
@@ -73,20 +69,20 @@ def forward_with_prompts_enhancement(model, prompts_enhancer, images):
     return student_proj, student_out, enhanced_features, attention_info
 
 
-def get_optimizer_with_conditional_prompts(model, prompts_enhancer, epoch, args):
-    """根据epoch决定是否包含prompts参数的优化器"""
-    params_groups = get_params_groups(model)
-
-    # 只在非warm up阶段添加prompts参数
-    if epoch >= args.warmup_epochs and prompts_enhancer is not None:
-        prompts_params = prompts_enhancer.get_prompts_parameters()
-        if prompts_params:
-            prompts_group = {'params': prompts_params, 'lr': args.lr * 0.1}
-            params_groups.append(prompts_group)
-
-    optimizer = SGD(params_groups, lr=args.lr, momentum=args.momentum,
-                    weight_decay=args.weight_decay)
-    return optimizer
+# def get_optimizer_with_conditional_prompts(model, prompts_enhancer, epoch, args):
+#     """根据epoch决定是否包含prompts参数的优化器"""
+#     params_groups = get_params_groups(model)
+#
+#     # 只在非warm up阶段添加prompts参数
+#     if epoch >= args.warmup_epochs and prompts_enhancer is not None:
+#         prompts_params = prompts_enhancer.get_prompts_parameters()
+#         if prompts_params:
+#             prompts_group = {'params': prompts_params, 'lr': args.lr * 0.1}
+#             params_groups.append(prompts_group)
+#
+#     optimizer = SGD(params_groups, lr=args.lr, momentum=args.momentum,
+#                     weight_decay=args.weight_decay)
+#     return optimizer
 
 '''offline train and test'''
 '''====================================================================================================================='''
@@ -239,9 +235,21 @@ def test_offline(model, test_loader, epoch, save_name, args):
 
 def train_online(student, student_pre, proto_aug_manager, prompts_enhancer, train_loader, test_loader, current_session,
                  args):
-    # 添加默认warm up epochs参数
-    if not hasattr(args, 'warmup_epochs'):
-        args.warmup_epochs = 0
+
+    params_groups = get_params_groups(student)
+    prompts_params = list(prompts_enhancer.parameters())
+    # 可以设置不同的学习率
+    params_groups = params_groups + [{'params': prompts_params, 'lr': args.lr}]
+
+
+    optimizer = SGD(params_groups, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
+
+    exp_lr_scheduler = lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=args.epochs_online_per_session,
+            eta_min=args.lr * 1e-3,
+        )
+
 
     cluster_criterion = DistillLoss(
         args.warmup_teacher_temp_epochs,
@@ -255,6 +263,7 @@ def train_online(student, student_pre, proto_aug_manager, prompts_enhancer, trai
     best_test_acc_all = 0
     best_test_acc_old = 0
     best_test_acc_new = 0
+
     best_test_acc_soft_all = 0
     best_test_acc_seen = 0
     best_test_acc_unseen = 0
@@ -262,28 +271,9 @@ def train_online(student, student_pre, proto_aug_manager, prompts_enhancer, trai
     for epoch in range(args.epochs_online_per_session):
         loss_record = AverageMeter()
 
-        # 判断是否在warm up阶段
-        is_warmup = epoch < args.warmup_epochs
-
-        # 根据当前epoch创建优化器
-        optimizer = get_optimizer_with_conditional_prompts(student, prompts_enhancer, epoch, args)
-
-        # 学习率调度器
-        exp_lr_scheduler = lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=args.epochs_online_per_session - epoch,  # 剩余epochs
-            eta_min=args.lr * 1e-3,
-        )
-
         student.train()
         student_pre.eval()
-
-        # 只在非warm up阶段设置prompts_enhancer为训练模式
-        if prompts_enhancer is not None and not is_warmup:
-            prompts_enhancer.train()
-        elif prompts_enhancer is not None:
-            prompts_enhancer.eval()
-
+        prompts_enhancer.train()
         for batch_idx, batch in enumerate(train_loader):
 
             images, class_labels, uq_idxs, _ = batch
@@ -296,28 +286,17 @@ def train_online(student, student_pre, proto_aug_manager, prompts_enhancer, trai
             feats = student[0](images)
             feats = torch.nn.functional.normalize(feats, dim=-1)
 
-            # 根据阶段决定前向传播方式
-            if is_warmup:
-                # Warm up阶段：不使用prompts增强
-                student_proj, student_out = student(images)
-                enhanced_features = None
-                attention_info = None
-                prompts_loss = torch.tensor(0.0, device=images.device)
-            else:
-                # 正式训练阶段：使用prompts增强
-                student_proj, student_out, enhanced_features, attention_info = forward_with_prompts_enhancement(
-                    student, prompts_enhancer, images
-                )
+            # 正式训练阶段：使用prompts增强
+            student_proj, student_out, enhanced_features, attention_info = forward_with_prompts_enhancement(
+                student, prompts_enhancer, images
+            )
 
-                # 计算prompts损失
-                prompts_loss = torch.tensor(0.0, device=images.device)
-                if prompts_enhancer is not None and attention_info is not None:
-                    backbone_features = student[0](images)
-                    backbone_features = torch.nn.functional.normalize(backbone_features, dim=-1)
-                    prompts_losses = prompts_enhancer.compute_prompts_losses(
-                        backbone_features, enhanced_features, attention_info
-                    )
-                    prompts_loss = prompts_losses['total']
+            # 计算prompts损失
+            prompts_loss = torch.tensor(0.0, device=images.device)
+            prompts_losses = prompts_enhancer.compute_prompts_losses(
+                feats, enhanced_features, attention_info
+            )
+            prompts_loss = prompts_losses['total']
 
             teacher_out = student_out.detach()
 
@@ -374,13 +353,10 @@ def train_online(student, student_pre, proto_aug_manager, prompts_enhancer, trai
             # loss += spacing_loss
             loss += args.feat_distill_weight * feat_distill_loss
 
-            # 只在非warm up阶段添加prompts损失
-            if not is_warmup:
-                loss += args.prompts_weight * prompts_loss
+            loss += args.prompts_weight * prompts_loss
 
             # logs
-            phase_str = "Warmup" if is_warmup else "Enhanced"
-            pstr = f'[{phase_str}] '
+            pstr = ''
             pstr += f'me_max_loss_old_new: {me_max_loss_old_new.item():.4f} '
             pstr += f'me_max_loss_old_in: {me_max_loss_old_in.item():.4f} '
             pstr += f'me_max_loss_new_in: {me_max_loss_new_in.item():.4f} '
@@ -388,10 +364,7 @@ def train_online(student, student_pre, proto_aug_manager, prompts_enhancer, trai
             pstr += f'contrastive_loss: {contrastive_loss.item():.4f} '
             pstr += f'proto_aug_loss: {proto_aug_loss.item():.4f} '
             pstr += f'feat_distill_loss: {feat_distill_loss.item():.4f} '
-
-            # 只在非warm up阶段显示prompts损失
-            if not is_warmup and prompts_loss.item() > 0:
-                pstr += f'prompts_loss: {prompts_loss.item():.4f} '
+            pstr += f'prompts_loss: {prompts_loss.item():.4f} '
 
             loss_record.update(loss.item(), class_labels.size(0))
             optimizer.zero_grad()
@@ -408,26 +381,19 @@ def train_online(student, student_pre, proto_aug_manager, prompts_enhancer, trai
                 args.logger.info(
                     f'Avg old prob: {torch.sum(avg_probs_old_in).item():.4f} | Avg new prob: {torch.sum(avg_probs_new_in).item():.4f} | Pred new ratio: {new_pred_ratio:.4f} | Ground-truth new ratio: {new_true_ratio:.4f}')
 
-        # 阶段转换提示
-        if epoch == args.warmup_epochs - 1:
-            args.logger.info(
-                f'=== Warmup completed! Switching to enhanced training with prompts from epoch {epoch + 1} ===')
 
-        args.logger.info(f'[{phase_str}] Train Epoch: {epoch} Avg Loss: {loss_record.avg:.4f}')
 
-        # 打印prompts统计信息 (只在非warm up阶段)
-        if not is_warmup and prompts_enhancer is not None and epoch % 10 == 0:
-            stats = prompts_enhancer.get_statistics()
-            args.logger.info(f'Prompts Stats: {stats}')
+        # stats = prompts_enhancer.get_statistics()
+        # args.logger.info(f'Prompts Stats: {stats}')
 
         args.logger.info('Testing on disjoint test set...')
         all_acc_test, old_acc_test, new_acc_test, \
             all_acc_soft_test, seen_acc_test, unseen_acc_test = test_online(student, test_loader, epoch=epoch,
                                                                             save_name='Test ACC', args=args)
         args.logger.info(
-            f'[{phase_str}] Test Accuracies (Hard): All {all_acc_test:.4f} | Old {old_acc_test:.4f} | New {new_acc_test:.4f}')
+            f'[Test Accuracies (Hard): All {all_acc_test:.4f} | Old {old_acc_test:.4f} | New {new_acc_test:.4f}')
         args.logger.info(
-            f'[{phase_str}] Test Accuracies (Soft): All {all_acc_soft_test:.4f} | Seen {seen_acc_test:.4f} | Unseen {unseen_acc_test:.4f}')
+            f'[Test Accuracies (Soft): All {all_acc_soft_test:.4f} | Seen {seen_acc_test:.4f} | Unseen {unseen_acc_test:.4f}')
 
         # Step schedule
         exp_lr_scheduler.step()
@@ -438,10 +404,9 @@ def train_online(student, student_pre, proto_aug_manager, prompts_enhancer, trai
             'epoch': epoch + 1,
         }
 
-        # 保存prompts状态 (只在非warm up阶段)
-        if not is_warmup and prompts_enhancer is not None:
-            prompts_save_path = args.model_path.replace('.pt', f'_session-{current_session}_prompts.pt')
-            prompts_enhancer.save_state(prompts_save_path)
+
+        prompts_save_path = args.model_path.replace('.pt', f'_session-{current_session}_prompts.pt')
+        prompts_enhancer.save_state(prompts_save_path)
 
         if all_acc_test > best_test_acc_all:
             args.logger.info(f'Best ACC on All Classes on test set of session-{current_session}: {all_acc_test:.4f}...')
@@ -451,10 +416,9 @@ def train_online(student, student_pre, proto_aug_manager, prompts_enhancer, trai
             args.logger.info(
                 "model saved to {}.".format(args.model_path[:-3] + '_session-' + str(current_session) + f'_best.pt'))
 
-            # 保存最佳prompts状态 (只在非warm up阶段)
-            if not is_warmup and prompts_enhancer is not None:
-                best_prompts_save_path = args.model_path[:-3] + '_session-' + str(current_session) + f'_best_prompts.pt'
-                prompts_enhancer.save_state(best_prompts_save_path)
+            # 保存最佳prompts状态
+            best_prompts_save_path = args.model_path[:-3] + '_session-' + str(current_session) + f'_best_prompts.pt'
+            prompts_enhancer.save_state(best_prompts_save_path)
 
             best_test_acc_all = all_acc_test
             best_test_acc_old = old_acc_test
@@ -510,12 +474,10 @@ def test_online(model, test_loader, epoch, save_name, args):
         images = images.cuda(non_blocking=True)
 
         with torch.no_grad():
-            # Get model predictions without prompts enhancement
-            try:
-                _, logits = model(images)
-            except:
-                logits = model(images)
-
+            student_proj, student_out, enhanced_features, attention_info = forward_with_prompts_enhancement(
+                model, prompts_enhancer, images
+            )
+            logits = student_out
             batch_preds = logits.argmax(1).cpu().numpy()
             preds.append(batch_preds)
             targets.append(label.cpu().numpy())
@@ -612,8 +574,6 @@ if __name__ == "__main__":
     parser.add_argument('--sup_weight', type=float, default=0.35)
     parser.add_argument('--n_views', default=2, type=int)
     parser.add_argument('--contrast_unlabel_only', action='store_true', default=False)
-    parser.add_argument('--warmup_epochs', default=0, type=int,
-                        help='Number of warmup epochs before using prompts enhancement')
 
     '''group-wise entropy regularization'''
     # memax weight for offline session
@@ -645,7 +605,7 @@ if __name__ == "__main__":
                         help='Whether to use prompts enhancement')
     parser.add_argument('--prompts_pool_path', type=str, default=None,
                         help='Path to the Prepare file')
-    parser.add_argument('--prompts_weight', type=float, default=0.01,
+    parser.add_argument('--prompts_weight', type=float, default=0.1,
                         help='Weight for prompts losses')
     parser.add_argument('--prompts_top_k', type=int, default=1,
                         help='Number of top prompts to use')
@@ -748,6 +708,7 @@ if __name__ == "__main__":
             prompts_enhancer = create_prompts_enhancer(
                 feature_dim=args.feat_dim,
                 prompts_pool_path=args.prompts_pool_path,
+                top_k=args.prompts_top_k,
                 device=device
             )
             prompts_enhancer.to(device)
@@ -833,9 +794,8 @@ if __name__ == "__main__":
         初始化一个ProtoAugManager实例
         '''
 
-        proto_aug_manager = ProtoAugSpacingManager(args.feat_dim, args.n_views * args.batch_size, args.hardness_temp,
-                                                   args.radius_scale, device, args.logger, spacing_alpha=1.2,
-                                                   spacing_weight=1.0)
+        proto_aug_manager = ProtoAugManager(args.feat_dim, args.n_views * args.batch_size, args.hardness_temp,
+                                                   args.radius_scale, device, args.logger)
 
         # best test acc list across continual sessions
         args.best_test_acc_all_list = []
@@ -942,7 +902,7 @@ if __name__ == "__main__":
                                                                        num_workers=args.num_workers_test,
                                                                        batch_size=256, shuffle=False, pin_memory=False)
             if args.init_new_head:
-                new_head = get_kmeans_centroid_for_new_head(model_pre, online_session_train_loader_for_new_head_init,
+                new_head = get_kmeans_centroid_for_new_head(model_pre, prompts_enhancer, online_session_train_loader_for_new_head_init,
                                                             args, device)
 
                 # 保持范数一致性
@@ -973,7 +933,7 @@ if __name__ == "__main__":
                 offline_session_train_loader_for_proto_aug = DataLoader(offline_session_train_dataset_for_proto_aug,
                                                                         num_workers=args.num_workers_test,
                                                                         batch_size=256, shuffle=False, pin_memory=False)
-                proto_aug_manager.update_prototypes_offline(model_pre, offline_session_train_loader_for_proto_aug,
+                proto_aug_manager.update_prototypes_offline(model_pre, prompts_enhancer, offline_session_train_loader_for_proto_aug,
                                                             args.num_labeled_classes)
                 save_path = os.path.join(args.model_dir, 'ProtoAugDict' + '_offline' + f'.pt')
                 args.logger.info('Saving ProtoAugDict to {}.'.format(save_path))
@@ -993,7 +953,7 @@ if __name__ == "__main__":
             args.logger.info('loading best checkpoints current online session: ' + load_dir_online_best)
             load_dict = torch.load(load_dir_online_best)
             model_cur.load_state_dict(load_dict['model'])
-            proto_aug_manager.update_prototypes_online(model_cur, online_session_train_loader_for_new_head_init,
+            proto_aug_manager.update_prototypes_online(model_cur, prompts_enhancer, online_session_train_loader_for_new_head_init,
                                                        args.num_seen_classes,
                                                        args.num_labeled_classes + args.num_cur_novel_classes)
             save_path = os.path.join(args.model_dir, 'ProtoAugDict' + '_session-' + str(session + 1) + f'.pt')

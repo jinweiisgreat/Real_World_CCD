@@ -10,7 +10,7 @@ cub_root = '/home/ps/_jinwei/Dataset/CUB'
 aircraft_root = '/home/ps/_jinwei/Dataset/Aircraft/fgvc-aircraft-2013b/'
 car_root = "/home/ps/_jinwei/Dataset/Stanford-Cars/"
 herbarium_dataroot = '/home/ps/_jinwei/Dataset/Herbarium19-Small/'
-imagenet_root = '/home/ps/_jinwei/Dataset/ImageNet/ILSVRC2012/imagenet/'
+imagenet_root = '/home/ps/_lzj/GCD/dataset/ImageNet100/ILSVRC12'
 
 # OSR Split
 osr_split_dir = '/home/ps/_lzj/GCD/code/SimGCD_ovdet/data/ssb_splits'

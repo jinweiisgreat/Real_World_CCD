@@ -35,24 +35,44 @@ class ImageNetBase(torchvision.datasets.ImageFolder):
         return img, label, uq_idx
 
 
+# def subsample_dataset(dataset, idxs):
+#
+#     imgs_ = []
+#     for i in idxs:
+#         imgs_.append(dataset.imgs[i])
+#     dataset.imgs = imgs_
+#
+#     samples_ = []
+#     for i in idxs:
+#         samples_.append(dataset.samples[i])
+#     dataset.samples = samples_
+#
+#     # dataset.imgs = [x for i, x in enumerate(dataset.imgs) if i in idxs]
+#     # dataset.samples = [x for i, x in enumerate(dataset.samples) if i in idxs]
+#
+#     dataset.targets = np.array(dataset.targets)[idxs].tolist()
+#     dataset.uq_idxs = dataset.uq_idxs[idxs]
+#
+#     return dataset
+
 def subsample_dataset(dataset, idxs):
+    import numpy as np
+    # 统一为一维整数数组
+    idxs = np.asarray(idxs)
+    if idxs.ndim != 1:
+        idxs = idxs.ravel()
+    if not np.issubdtype(idxs.dtype, np.integer):
+        # 安全转换（若有小数必须确保是源自整数计算）
+        idxs = idxs.astype(np.int64)
+    # 去重并保持顺序（可选）
+    # _, unique_pos = np.unique(idxs, return_index=True)
+    # idxs = idxs[np.sort(unique_pos)]
 
-    imgs_ = []
-    for i in idxs:
-        imgs_.append(dataset.imgs[i])
-    dataset.imgs = imgs_
-
-    samples_ = []
-    for i in idxs:
-        samples_.append(dataset.samples[i])
-    dataset.samples = samples_
-
-    # dataset.imgs = [x for i, x in enumerate(dataset.imgs) if i in idxs]
-    # dataset.samples = [x for i, x in enumerate(dataset.samples) if i in idxs]
-
-    dataset.targets = np.array(dataset.targets)[idxs].tolist()
-    dataset.uq_idxs = dataset.uq_idxs[idxs]
-
+    dataset.targets = np.asarray(dataset.targets)[idxs].tolist()
+    # dataset.samples / dataset.imgs 结构通常为 [(path, target), ...]
+    dataset.samples = [dataset.samples[i] for i in idxs]
+    if hasattr(dataset, "imgs"):
+        dataset.imgs = dataset.samples
     return dataset
 
 
@@ -221,14 +241,14 @@ def get_imagenet_100_datasets(train_transform, test_transform, config_dict, trai
         online_session_each_novel_slices = []
         for i in range(len(online_session_targets)):
             if (s >= 1) and (i < s * targets_per_session):
-                online_session_each_novel_slices.append(np.random.choice(np.array(list(range(len(online_session_each_novel_samples[i].targets)))), 
+                online_session_each_novel_slices.append(np.random.choice(np.array(list(range(len(online_session_each_novel_samples[i].targets)))),
                                                                          online_novel_seen_num, replace=False))
             else:
                 if len(online_session_each_novel_samples[i].targets) > online_novel_unseen_num:   # NOTE!!! for long-tailed ImageNet!!!
-                    online_session_each_novel_slices.append(np.random.choice(np.array(list(range(len(online_session_each_novel_samples[i].targets)))), 
+                    online_session_each_novel_slices.append(np.random.choice(np.array(list(range(len(online_session_each_novel_samples[i].targets)))),
                                                                          online_novel_unseen_num, replace=False))
                 else:
-                    online_session_each_novel_slices.append(np.random.choice(np.array(list(range(len(online_session_each_novel_samples[i].targets)))), 
+                    online_session_each_novel_slices.append(np.random.choice(np.array(list(range(len(online_session_each_novel_samples[i].targets)))),
                                                                          len(online_session_each_novel_samples[i].targets), replace=False))
 
         online_session_novel_samples = [subsample_dataset(deepcopy(samples), online_session_each_novel_slices[i])
@@ -258,7 +278,7 @@ def get_imagenet_100_datasets(train_transform, test_transform, config_dict, trai
 
 # if __name__ == '__main__':
 
-#     all_datasets, novel_targets_shuffle = get_imagenet_100_datasets(None, None, dataset_split_config_dict['imagenet_100'], 
+#     all_datasets, novel_targets_shuffle = get_imagenet_100_datasets(None, None, dataset_split_config_dict['imagenet_100'],
 #                                                                     range(50), 0.8, False, False, 0)
 
 #     # print(type(all_datasets['offline_train_dataset']))   # <class '__main__.ImageNetBase'>

@@ -21,7 +21,7 @@ from PIL import Image
 import time
 from datetime import datetime
 import torchvision.transforms as transforms
-
+from models import vision_transformer as vits
 
 # 添加项目路径以便导入现有模块
 import sys
@@ -59,12 +59,20 @@ class VisualPromptsPoolCreator:
             self.processor = CLIPProcessor.from_pretrained(model_path)
             self.feature_dim = self.model.config.vision_config.hidden_size
             print(f"CLIP feature dimension: {self.feature_dim}")
-        elif self.model_type == 'dino':
+        elif self.model_type == 'dinov2':
             self.model = Dinov2Model.from_pretrained(model_path)
             # DINOv2没有专用的processor，使用简单的预处理
             self.processor = None
             self.feature_dim = self.model.config.hidden_size
             print(f"DINOv2 feature dimension: {self.feature_dim}")
+        elif self.model_type == 'dinov1':
+            # 加载DINOv1模型
+            self.model = vits.vit_base()
+            state_dict = torch.load(model_path, map_location='cpu')
+            self.model.load_state_dict(state_dict)
+            self.processor = None
+            self.feature_dim = 768  # ViT-Base的特征维度
+            print(f"DINOv1 feature dimension: {self.feature_dim}")
         else:
             raise ValueError(f"不支持的模型类型: {model_type}, 请选择 'clip' 或 'dino'")
 
@@ -114,7 +122,7 @@ class VisualPromptsPoolCreator:
                     vision_outputs = self.model.vision_model(pixel_values=pixel_values)
                     # features = vision_outputs.pooler_output
                     features = vision_outputs.last_hidden_state[:, 0]
-                elif self.model_type == 'dino':
+                elif self.model_type == 'dinov2':
                     # DINOv2直接接收归一化的图像张量
                     # 如果图像已经被处理为[0,1]范围，需要调整到[-1,1]或其他DINOv2期望的范围
                     if images.max() <= 1.0:
@@ -128,11 +136,23 @@ class VisualPromptsPoolCreator:
                             std = torch.tensor([0.2023, 0.1994, 0.2010]).view(1, 3, 1, 1).to(self.device)
                             print("Using default CIFAR normalization for DINOv2")
                             images = (images - mean) / std
-
                     # 使用DINOv2提取特征
                     outputs = self.model(pixel_values=images)
                     features = outputs.pooler_output
-                    # features = outputs.last_hidden_state[:, 0]
+
+                elif self.model_type == 'dinov1':
+                    # DINOv1处理
+                    if images.max() <= 1.0:
+                        if self.dataset_name == 'imagenet':
+                            mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(self.device)
+                            std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(self.device)
+                            images = (images - mean) / std
+                        else:
+                            mean = torch.tensor([0.4914, 0.4822, 0.4465]).view(1, 3, 1, 1).to(self.device)
+                            std = torch.tensor([0.2023, 0.1994, 0.2010]).view(1, 3, 1, 1).to(self.device)
+                            images = (images - mean) / std
+                    # DINOv1直接输出CLS token特征
+                    features = self.model(images)  # 返回[CLS] token的特征
 
                 # L2归一化
                 features = torch.nn.functional.normalize(features, p=2, dim=1)
@@ -169,7 +189,9 @@ class VisualPromptsPoolCreator:
 
         # 计算余弦相似度矩阵
         print("Computing cosine similarity matrix...")
-        similarity_matrix = cosine_similarity(features)
+        # similarity_matrix = cosine_similarity(features)
+        similarity_matrix = features@features.T
+        print(similarity_matrix)
         adjacency_matrix = (similarity_matrix > self.similarity_threshold).astype(np.int8)
         np.fill_diagonal(adjacency_matrix, 0)  # Remove self-loops
         print("Performing community detection...")
@@ -557,13 +579,14 @@ if __name__ == "__main__":
                         help='Proportion of training labels to use')
 
     # 模型参数
-    parser.add_argument('--model_type', type=str, default='dino', choices=['clip', 'dino'],
+    parser.add_argument('--model_type', type=str, default='dinov1', choices=['clip', 'dinov2', 'dinov1'],
                         help='Model type to use: clip or dino')
     # /home/ps/_jinwei/CLIP_L14
     # /home/ps/_jinwei/DINO_v2_base
-    parser.add_argument('--model_path', type=str, default="/home/ps/_jinwei/DINO_v2_base",
+    # /home/ps/_lzj/GCD/model/pretrained_models/dino/dino_vitbase16_pretrain.pth
+    parser.add_argument('--model_path', type=str, default="/home/ps/_lzj/GCD/model/pretrained_models/dino/dino_vitbase16_pretrain.pth",
                         help='Path to model')
-    parser.add_argument('--similarity_threshold', type=float, default=0.8,
+    parser.add_argument('--similarity_threshold', type=float, default=0.7,
                         help='Similarity threshold for building graph')
 
     # 处理参数
@@ -586,7 +609,7 @@ if __name__ == "__main__":
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed')
 
-    parser.add_argument('--num_old_classes', type=int, default=100,
+    parser.add_argument('--num_old_classes', type=int, default=50,
                        help='Number of old classes')
     parser.add_argument('--use_ssb_splits', action='store_true', default=False,
                        help='Use SSB splits for FGVC datasets')
@@ -599,7 +622,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    from get_dataset_prompts import get_full_dataset_for_prompts
+    # from get_dataset_prompts import get_full_dataset_for_prompts
 
     # 设置随机种子
     torch.manual_seed(args.seed)
@@ -644,23 +667,23 @@ if __name__ == "__main__":
     ])
 
     # 获取数据集
-    # offline_train_dataset, _, _, _, _, _, _ = get_datasets(
-    #     args.dataset_name, test_transform, test_transform, args)
+    offline_train_dataset, _, _, _, _, _, _ = get_datasets(
+        args.dataset_name, test_transform, test_transform, args)
 
-    full_dataset = get_full_dataset_for_prompts(args.dataset_name, test_transform)
-    print(f"Successfully loaded {len(full_dataset)} samples")
+    # full_dataset = get_full_dataset_for_prompts(args.dataset_name, test_transform)
+    # print(f"Successfully loaded {len(full_dataset)} samples")
 
 
     # 创建数据加载器
     dataloader = DataLoader(
-        full_dataset,
+        offline_train_dataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=True
     )
 
-    print(f"Loaded dataset with {len(full_dataset)} samples")
+    print(f"Loaded dataset with {len(offline_train_dataset)} samples")
 
     # 创建prompts池
     creator = VisualPromptsPoolCreator(
