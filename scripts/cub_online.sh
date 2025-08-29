@@ -11,7 +11,7 @@ CUDA_VISIBLE_DEVICES=0 python train_happy.py \
     --warmup_teacher_temp 0.05 \
     --teacher_temp 0.05 \
     --warmup_teacher_temp_epochs 10\
-    --lr 0.1 \
+    --lr 0.01 \
     --memax_old_new_weight 1 \
     --memax_old_in_weight 1 \
     --memax_new_in_weight 1 \

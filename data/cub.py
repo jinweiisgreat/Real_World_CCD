@@ -178,7 +178,7 @@ def get_train_val_indices(train_dataset, val_split=0.2):
 
 # CUB dataset for Continual-GCD
 def get_cub_datasets(train_transform, test_transform, config_dict, train_classes=range(100),
-                           prop_train_labels=0.8, split_train_val=False, is_shuffle=False, seed=0,test_mode=None):
+                           prop_train_labels=0.8, split_train_val=False, is_shuffle=False, seed=0):
     continual_session_num = config_dict['continual_session_num']
     online_novel_unseen_num = config_dict['online_novel_unseen_num']
     online_old_seen_num = config_dict['online_old_seen_num']
@@ -257,14 +257,14 @@ def get_cub_datasets(train_transform, test_transform, config_dict, train_classes
         online_session_each_novel_slices = []
         for i in range(len(online_session_targets)):
             if (s >= 1) and (i < s * targets_per_session):
-                online_session_each_novel_slices.append(np.random.choice(np.array(list(range(len(online_session_each_novel_samples[i].data)))), 
+                online_session_each_novel_slices.append(np.random.choice(np.array(list(range(len(online_session_each_novel_samples[i].data)))),
                                                                          online_novel_seen_num, replace=False))
             else:
-                online_session_each_novel_slices.append(np.random.choice(np.array(list(range(len(online_session_each_novel_samples[i].data)))), 
+                online_session_each_novel_slices.append(np.random.choice(np.array(list(range(len(online_session_each_novel_samples[i].data)))),
                                                                          online_novel_unseen_num, replace=False))
 
         online_session_novel_samples = [subsample_dataset(deepcopy(samples), online_session_each_novel_slices[i])
-                                        for i, samples in enumerate(online_session_each_novel_samples)] 
+                                        for i, samples in enumerate(online_session_each_novel_samples)]
 
         online_session_novel_dataset = subDataset_wholeDataset(online_session_novel_samples)
         online_novel_dataset_unlabelled_list.append(online_session_novel_dataset)
@@ -293,13 +293,3 @@ def get_cub_datasets(train_transform, test_transform, config_dict, train_classes
 #     all_datasets, novel_targets_shuffle = get_cub_datasets(None, None, dataset_split_config_dict['cub'], range(100), 0.8, False, True, 0)
 
 #     z = 0
-
-if __name__ == '__main__':
-    import os
-
-    cub_root = '/home/ps/_jinwei/Dataset/CUB'  # 替换为你的实际路径
-
-    # 不用 transform
-    dataset = CustomCub2011(root=cub_root, transform=None, train=True, download=False)
-    print(f"Total samples: {len(dataset)}")
-    print(dataset.data)
