@@ -12,15 +12,15 @@ from data.data_utils import subsample_instances
 from config import tiny_imagenet_root
 
 
-# dataset_split_config_dict = {
-#     'tiny_imagenet': {#'offline_old_cls_num': 100,
-#                 #'offine_prop_train_labels': 0.8,   # offline, ratio of labeled data from old classes
-#                 'continual_session_num': 5,   # num of continual learining sessions
-#                 'online_novel_unseen_num': 400,   # each continual session: num of samples per novel (unseen & first-time) class
-#                 'online_old_seen_num': 25,   # each continual session: num of samples per old (labeled) class
-#                 'online_novel_seen_num': 25,   # each continual session: num of samples per novel (seen) class
-#                  },
-# }
+dataset_split_config_dict = {
+    'tiny_imagenet': {#'offline_old_cls_num': 100,
+                #'offine_prop_train_labels': 0.8,   # offline, ratio of labeled data from old classes
+                'continual_session_num': 5,   # num of continual learining sessions
+                'online_novel_unseen_num': 400,   # each continual session: num of samples per novel (unseen & first-time) class
+                'online_old_seen_num': 25,   # each continual session: num of samples per old (labeled) class
+                'online_novel_seen_num': 25,   # each continual session: num of samples per novel (seen) class
+                 },
+}
 
 
 '''
@@ -320,12 +320,12 @@ def get_tiny_imagenet_datasets(train_transform, test_transform, config_dict, tra
     return all_datasets, novel_targets_shuffle
 
 
-# if __name__ == '__main__':
-#     #whole_training_set = TinyImageNet(root=tiny_imagenet_root, split='train', transform=None, download=False)
-#     #print(len(whole_training_set), len(whole_training_set.data))   # 100000 100000
-#     datasets = get_tiny_imagenet_datasets(train_transform=None, test_transform=None,
-#                                 config_dict=dataset_split_config_dict['tiny_imagenet'],
-#                                 train_classes=range(100),
-#                                 prop_train_labels=0.8,
-#                                 split_train_val=False)
+if __name__ == '__main__':
+    whole_training_set = TinyImageNet(root=tiny_imagenet_root, split='train', transform=None, download=True)
+    print(len(whole_training_set), len(whole_training_set.data))   # 100000 100000
+    datasets = get_tiny_imagenet_datasets(train_transform=None, test_transform=None,
+                                config_dict=dataset_split_config_dict['tiny_imagenet'],
+                                train_classes=range(100),
+                                prop_train_labels=0.8,
+                                split_train_val=False)
 

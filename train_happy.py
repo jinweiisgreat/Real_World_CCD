@@ -1,6 +1,7 @@
 import argparse
 import os
 import math
+from sentry_sdk.utils import epoch
 from tqdm import tqdm
 from copy import deepcopy
 
@@ -263,24 +264,6 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             else:
                 me_max_loss_new_in = torch.tensor(0.0, device=device)
 
-            # # ========== Sinkhorn 正则化 for unseen classes ==========
-            # sinkhorn_loss = torch.tensor(0.0, device=device)
-            #
-            # # 只对 unseen novel classes 应用 Sinkhorn 约束
-            # if args.num_seen_classes < student_out.shape[1]:
-            #     unseen_logits = student_out[:, args.num_seen_classes:]  # [2*B, num_unseen]
-            #
-            #     if unseen_logits.shape[1] > 0:
-            #         sk = SinkhornKnopp()
-            #
-            #         # 获取 Sinkhorn 分配
-            #         with torch.no_grad():
-            #             assignments = sk(unseen_logits / 0.1)  # [2*B, num_unseen]
-            #
-            #         # 计算 Sinkhorn 损失：软标签交叉熵
-            #         log_probs = F.log_softmax(unseen_logits / 0.1, dim=1)
-            #         sinkhorn_loss = -torch.sum(assignments * log_probs, dim=1).mean()
-            # overall me-max loss
             cluster_loss += args.memax_old_new_weight * me_max_loss_old_new + \
                 args.memax_old_in_weight * me_max_loss_old_in + args.memax_new_in_weight * me_max_loss_new_in
 
@@ -336,7 +319,7 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
 
         args.logger.info('Testing on disjoint test set...')
         all_acc_test, old_acc_test, new_acc_test, \
-            all_acc_soft_test, seen_acc_test, unseen_acc_test = test_online(student, test_loader, epoch=epoch, save_name='Test ACC', args=args)
+            all_acc_soft_test, seen_acc_test, unseen_acc_test = test_online(student, test_loader, epoch=epoch, save_name='Test ACC', current_session = current_session ,args=args)
         args.logger.info('Test Accuracies (Hard): All {:.4f} | Old {:.4f} | New {:.4f}'.format(all_acc_test, old_acc_test, new_acc_test))
         args.logger.info('Test Accuracies (Soft): All {:.4f} | Seen {:.4f} | Unseen {:.4f}'.format(all_acc_soft_test, seen_acc_test, unseen_acc_test))
 
@@ -378,29 +361,143 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
     args.best_test_acc_seen_list.append(best_test_acc_seen)
     args.best_test_acc_unseen_list.append(best_test_acc_unseen)
 
-def test_online(model, test_loader, epoch, save_name, args):
-    """
-    Online testing function that only generates a confusion matrix.
+# def test_online(model, test_loader, epoch, save_name, args):
+#     """
+#     Online testing function that only generates a confusion matrix.
+#
+#     Args:
+#         model: Model to evaluate
+#         test_loader: Test data loader
+#         epoch: Current training epoch
+#         save_name: Name for saving results
+#         args: Arguments object with logger
+#
+#     Returns:
+#         Evaluation metrics
+#     """
+#     # ============================ Model evaluation ============================
+#     model.eval()
+#
+#     preds, targets = [], []
+#     mask_hard = np.array([])
+#     mask_soft = np.array([])
+#
+#     for batch_idx, batch in enumerate(tqdm(test_loader, desc="Evaluating")):
+#         # Handle different data loader formats
+#         if len(batch) == 2:
+#             images, label = batch
+#         elif len(batch) >= 3:
+#             images, label, _ = batch[:3]
+#
+#         images = images.cuda(non_blocking=True)
+#
+#         with torch.no_grad():
+#             # Get model predictions
+#             try:
+#                 _, logits = model(images)
+#             except:
+#                 logits = model(images)
+#
+#             batch_preds = logits.argmax(1).cpu().numpy()
+#             preds.append(batch_preds)
+#             targets.append(label.cpu().numpy())
+#
+#             # Create masks for different evaluation metrics
+#             mask_hard = np.append(mask_hard, np.array([True if x.item() in range(len(args.train_classes))
+#                                                        else False for x in label]))
+#             mask_soft = np.append(mask_soft, np.array([True if x.item() in range(args.num_seen_classes)
+#                                                        else False for x in label]))
+#
+#     preds = np.concatenate(preds)
+#     targets = np.concatenate(targets)
+#
+#     # -----------------------
+#     # Generate confusion matrix
+#     # -----------------------
+#     if hasattr(args, 'log_dir') and hasattr(args,'epochs_online_per_session') and epoch == args.epochs_online_per_session - 1:
+#         try:
+#             # Get all classes present in the data
+#             all_classes = sorted(list(set(targets.tolist() + preds.tolist())))
+#
+#             # Generate confusion matrix
+#             cm = confusion_matrix(targets, preds, labels=all_classes)
+#
+#             # Create the plot
+#             plt.figure(figsize=(12, 10))
+#             sns.heatmap(cm, fmt='d', cmap='Blues',
+#                         xticklabels=all_classes,
+#                         yticklabels=all_classes)
+#
+#             plt.xlabel('Prediction')
+#             plt.ylabel('Ground Truth')
+#             plt.title(f'Confusion Matrix (Epoch {epoch})')
+#
+#             # Determine which session we're in
+#             current_session = 1
+#             if hasattr(args, 'num_seen_classes') and hasattr(args, 'num_labeled_classes') and hasattr(args,
+#                                                                                                       'num_novel_class_per_session'):
+#                 if args.num_seen_classes > args.num_labeled_classes:
+#                     completed_sessions = (
+#                                                      args.num_seen_classes - args.num_labeled_classes) // args.num_novel_class_per_session
+#                     current_session = completed_sessions + 1
+#
+#             session_str = f"session_{current_session}"
+#
+#             # Save confusion matrix
+#             conf_matrix_path = os.path.join(args.log_dir, f'confusion_matrix_{session_str}.png')
+#             plt.tight_layout()
+#             plt.savefig(conf_matrix_path)
+#             plt.close()
+#             args.logger.info(f"Confusion matrix saved to: {conf_matrix_path}")
+#
+#         except Exception as e:
+#             args.logger.info(f"Could not generate confusion matrix: {str(e)}")
+#
+#     # -----------------------
+#     # Calculate metrics with standard approach
+#     # -----------------------
+#     all_acc, old_acc, new_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_hard,
+#                                                     T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
+#                                                     args=args)
+#
+#     all_acc_soft, seen_acc, unseen_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_soft,
+#                                                              T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
+#                                                              args=args)
+#
+#     # Log results summary
+#     # args.logger.info(f"\nTest results summary (Epoch {epoch}):")
+#     # args.logger.info(f"Hard metrics: All={all_acc:.4f}, Old={old_acc:.4f}, New={new_acc:.4f}")
+#     # args.logger.info(f"Soft metrics: All={all_acc_soft:.4f}, Seen={seen_acc:.4f}, Unseen={unseen_acc:.4f}")
+#
+#     return all_acc, old_acc, new_acc, all_acc_soft, seen_acc, unseen_acc
 
-    Args:
-        model: Model to evaluate
-        test_loader: Test data loader
-        epoch: Current training epoch
-        save_name: Name for saving results
-        args: Arguments object with logger
-
-    Returns:
-        Evaluation metrics
+def test_online(model, test_loader, epoch, save_name, current_session, args):
     """
-    # ============================ Model evaluation ============================
+    改进的在线测试函数，支持prompt效果分析
+    """
+
     model.eval()
 
     preds, targets = [], []
+    features_list = []
     mask_hard = np.array([])
     mask_soft = np.array([])
 
+    # 预测分布统计
+    num_classes = args.num_labeled_classes + args.num_unlabeled_classes
+    class_prediction_counts = np.zeros(num_classes)
+
+    # 用于统计prompt效果
+    total_effectiveness_stats = {
+        'samples_helped': 0,
+        'samples_hurt': 0,
+        'total_samples': 0,
+        'accuracy_improvement': 0.0,
+        'confidence_improvement': 0.0
+    }
+
     for batch_idx, batch in enumerate(tqdm(test_loader, desc="Evaluating")):
-        # Handle different data loader formats
+        # 处理不同格式的数据加载器
         if len(batch) == 2:
             images, label = batch
         elif len(batch) >= 3:
@@ -409,17 +506,21 @@ def test_online(model, test_loader, epoch, save_name, args):
         images = images.cuda(non_blocking=True)
 
         with torch.no_grad():
-            # Get model predictions
-            try:
-                _, logits = model(images)
-            except:
-                logits = model(images)
+            # 直接使用PromptEnhancedModel的forward方法
+            # _, logits = model(images)
+            features, logits = model(images)
+            features_list.append(features.cpu().numpy())
+
 
             batch_preds = logits.argmax(1).cpu().numpy()
             preds.append(batch_preds)
             targets.append(label.cpu().numpy())
 
-            # Create masks for different evaluation metrics
+            # 更新预测计数
+            for pred in batch_preds:
+                class_prediction_counts[pred] += 1
+
+            # 创建不同评估指标的掩码
             mask_hard = np.append(mask_hard, np.array([True if x.item() in range(len(args.train_classes))
                                                        else False for x in label]))
             mask_soft = np.append(mask_soft, np.array([True if x.item() in range(args.num_seen_classes)
@@ -427,52 +528,75 @@ def test_online(model, test_loader, epoch, save_name, args):
 
     preds = np.concatenate(preds)
     targets = np.concatenate(targets)
+    features_array = np.concatenate(features_list, axis=0)
 
-    # -----------------------
-    # Generate confusion matrix
-    # -----------------------
-    if hasattr(args, 'log_dir') and hasattr(args,'epochs_online_per_session') and epoch == args.epochs_online_per_session - 1:
-        try:
-            # Get all classes present in the data
-            all_classes = sorted(list(set(targets.tolist() + preds.tolist())))
+    # 输出prompt效果统计
+    if total_effectiveness_stats['total_samples'] > 0:
+        avg_accuracy_improvement = total_effectiveness_stats['accuracy_improvement'] / total_effectiveness_stats[
+            'total_samples']
+        avg_confidence_improvement = total_effectiveness_stats['confidence_improvement'] / total_effectiveness_stats[
+            'total_samples']
+        net_help_ratio = (total_effectiveness_stats['samples_helped'] - total_effectiveness_stats['samples_hurt']) / \
+                         total_effectiveness_stats['total_samples']
 
-            # Generate confusion matrix
-            cm = confusion_matrix(targets, preds, labels=all_classes)
+        args.logger.info(f'Online Test Prompt Effectiveness - Session {current_session}, Epoch {epoch}: '
+                         f'Acc Improvement: {avg_accuracy_improvement:.4f}, '
+                         f'Conf Improvement: {avg_confidence_improvement:.4f}, '
+                         f'Net Help Ratio: {net_help_ratio:.4f}, '
+                         f'Helped: {total_effectiveness_stats["samples_helped"]}, '
+                         f'Hurt: {total_effectiveness_stats["samples_hurt"]}')
 
-            # Create the plot
-            plt.figure(figsize=(12, 10))
-            sns.heatmap(cm, fmt='d', cmap='Blues',
-                        xticklabels=all_classes,
-                        yticklabels=all_classes)
+    # 生成可视化
+    # if hasattr(args, 'log_dir') and epoch in [0, 4, args.epochs_online_per_session - 1] :
+    if epoch == 1:
+        # 创建可视化目录
+        vis_dir = os.path.join(args.log_dir, 'visualizations')
+        os.makedirs(vis_dir, exist_ok=True)
 
-            plt.xlabel('Prediction')
-            plt.ylabel('Ground Truth')
-            plt.title(f'Confusion Matrix (Epoch {epoch})')
+        # 生成混淆矩阵
+        from sklearn.metrics import confusion_matrix
+        import matplotlib.pyplot as plt
+        import seaborn as sns
 
-            # Determine which session we're in
-            current_session = 1
-            if hasattr(args, 'num_seen_classes') and hasattr(args, 'num_labeled_classes') and hasattr(args,
-                                                                                                      'num_novel_class_per_session'):
-                if args.num_seen_classes > args.num_labeled_classes:
-                    completed_sessions = (
-                                                     args.num_seen_classes - args.num_labeled_classes) // args.num_novel_class_per_session
-                    current_session = completed_sessions + 1
+        # 获取数据中存在的所有类别
+        all_classes = sorted(list(set(targets.tolist() + preds.tolist())))
 
-            session_str = f"session_{current_session}"
+        # 生成混淆矩阵
+        cm = confusion_matrix(targets, preds, labels=all_classes)
 
-            # Save confusion matrix
-            conf_matrix_path = os.path.join(args.log_dir, f'confusion_matrix_{session_str}.png')
-            plt.tight_layout()
-            plt.savefig(conf_matrix_path)
-            plt.close()
-            args.logger.info(f"Confusion matrix saved to: {conf_matrix_path}")
+        # 创建图表
+        plt.figure(figsize=(12, 10))
+        # sns.heatmap(cm, fmt='d', cmap='Blues',
+        #             xticklabels=all_classes,
+        #             yticklabels=all_classes)
+        #
+        # plt.xlabel('Prediction')
+        # plt.ylabel('Ground Truth')
+        # plt.title(f'Confusion Matrix - Session {current_session}')
 
-        except Exception as e:
-            args.logger.info(f"Could not generate confusion matrix: {str(e)}")
+        im = plt.imshow(cm, cmap='viridis', interpolation='nearest')  # 黄蓝配色
+        plt.title(f'Confusion Matrix - Session {current_session}')
+        plt.colorbar(im, fraction=0.046, pad=0.04)
+        plt.xlabel('Prediction')
+        plt.ylabel('Ground Truth')
+        plt.xticks(np.arange(0, len(all_classes), 5), all_classes[::5])
+        plt.yticks(np.arange(0, len(all_classes), 5), all_classes[::5])
+        plt.tight_layout()
 
-    # -----------------------
-    # Calculate metrics with standard approach
-    # -----------------------
+        # 保存混淆矩阵
+        conf_matrix_path = os.path.join(vis_dir, f'confusion_matrix_session_{current_session}.png')
+        plt.tight_layout()
+        plt.savefig(conf_matrix_path)
+        plt.close()
+        args.logger.info(f"Confusion matrix saved to: {conf_matrix_path}")
+
+        # 生成t-SNE可视化
+        visualize_tsne(features_array, targets, current_session, args)
+
+        # 生成分类器权重可视化
+        visualize_prediction_distribution(class_prediction_counts, current_session, args)
+
+    # 计算评估指标
     all_acc, old_acc, new_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_hard,
                                                     T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
                                                     args=args)
@@ -481,13 +605,136 @@ def test_online(model, test_loader, epoch, save_name, args):
                                                              T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
                                                              args=args)
 
-    # Log results summary
-    # args.logger.info(f"\nTest results summary (Epoch {epoch}):")
-    # args.logger.info(f"Hard metrics: All={all_acc:.4f}, Old={old_acc:.4f}, New={new_acc:.4f}")
-    # args.logger.info(f"Soft metrics: All={all_acc_soft:.4f}, Seen={seen_acc:.4f}, Unseen={unseen_acc:.4f}")
+    # 记录结果摘要
+    args.logger.info(f"\nTest results summary (Session {current_session}, Epoch {epoch}):")
+    args.logger.info(f"Hard metrics: All={all_acc:.4f}, Old={old_acc:.4f}, New={new_acc:.4f}")
+    args.logger.info(f"Soft metrics: All={all_acc_soft:.4f}, Seen={seen_acc:.4f}, Unseen={unseen_acc:.4f}")
 
     return all_acc, old_acc, new_acc, all_acc_soft, seen_acc, unseen_acc
 
+
+def visualize_tsne(features, labels, current_session, args):
+    """
+    t-SNE特征空间可视化
+    """
+    from sklearn.manifold import TSNE
+    import matplotlib.pyplot as plt
+
+    vis_dir = os.path.join(args.log_dir, 'visualizations')
+    os.makedirs(vis_dir, exist_ok=True)
+
+    args.logger.info(f"Generating t-SNE visualization for Session {current_session}...")
+
+    # t-SNE降维
+    tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(features) - 1))
+    features_2d = tsne.fit_transform(features)
+
+    # 区分old和new类别
+    num_old_classes = len(args.train_classes)
+    num_seen_classes = args.num_seen_classes
+
+    unique_labels = np.unique(labels)
+    colors = plt.cm.tab20(np.linspace(0, 1, len(unique_labels)))
+
+    # 正方形画布
+    plt.figure(figsize=(15, 15))
+
+    for idx, label in enumerate(unique_labels):
+        mask = labels == label
+
+        if label < num_old_classes:
+            marker = 'o'  # Old类：圆形
+        elif label < num_seen_classes:
+            marker = 'o'  # Seen类：圆形
+        else:
+            marker = '^'  # Unseen类：三角形
+
+        plt.scatter(features_2d[mask, 0], features_2d[mask, 1],
+                    c=[colors[idx]], marker=marker, s=30, alpha=1.0,
+                    edgecolors='none')
+
+    plt.title(f'Feature Space (t-SNE) - Session {current_session}', fontsize=14, pad=20)
+    plt.xlabel('t-SNE Dimension 1', fontsize=12)
+    plt.ylabel('t-SNE Dimension 2', fontsize=12)
+    # plt.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+    plt.tight_layout()
+    plt.savefig(os.path.join(vis_dir, f'tsne_session_{current_session}.png'),
+                dpi=300, bbox_inches='tight')
+    plt.close()
+
+    args.logger.info(f"t-SNE visualization saved to {vis_dir}")
+
+
+def visualize_prediction_distribution(class_prediction_counts, current_session, args):
+    """
+    可视化预测分布 - SCI专业风格，单栏宽度，全局排序
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    vis_dir = os.path.join(args.log_dir, 'visualizations')
+    os.makedirs(vis_dir, exist_ok=True)
+
+    # 归一化到0-1
+    total_predictions = class_prediction_counts.sum()
+    if total_predictions > 0:
+        probs = class_prediction_counts / total_predictions
+    else:
+        probs = class_prediction_counts
+
+    # 标记每个类是old还是new
+    num_old_classes = args.num_seen_classes
+    is_old = np.array([i < num_old_classes for i in range(len(probs))])
+
+    # 全局排序（从高到低）
+    sorted_indices = np.argsort(probs)[::-1]
+    probs_sorted = probs[sorted_indices]
+    is_old_sorted = is_old[sorted_indices]
+
+    # SCI专业配色
+    colors = ['#1f77b4' if old else '#d62728' for old in is_old_sorted]
+
+    # 创建图表 - 单栏宽度
+    fig, ax = plt.subplots(figsize=(3.5, 2.5), dpi=100)
+
+    # 设置淡蓝灰色背景
+    ax.set_facecolor('#fafbfc')
+
+    x = np.arange(len(probs_sorted))
+    ax.bar(x, probs_sorted, color=colors, width=0.8, edgecolor='none', alpha=0.8)
+
+    # 设置坐标轴标签
+    ax.set_xlabel('Class Index (sorted by prediction frequency)', fontsize=9)
+    ax.set_ylabel('Prediction Probability', fontsize=9, fontweight='bold')
+
+    # 网格线
+    ax.grid(True, linestyle='--', alpha=0.4, linewidth=0.8, axis='y')
+    ax.set_axisbelow(True)
+
+    # 设置刻度
+    ax.tick_params(direction='out', length=4, width=1.2, labelsize=8)
+
+    # 图例 - SCI风格
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor='#1f77b4', label='Old classes', alpha=0.8),
+        Patch(facecolor='#d62728', label='New classes', alpha=0.8)
+    ]
+    ax.legend(handles=legend_elements, loc='upper right', frameon=True,
+              fancybox=False, shadow=False, framealpha=0.9,
+              edgecolor='black', fontsize=8)
+
+    # 边框
+    for spine in ax.spines.values():
+        spine.set_edgecolor('black')
+        spine.set_linewidth(1.2)
+
+    plt.tight_layout()
+    save_path = os.path.join(vis_dir, f'prediction_distribution_session_{current_session}.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+
+    args.logger.info(f"Prediction distribution saved to {save_path}")
 '''====================================================================================================================='''
 
 

@@ -35,44 +35,22 @@ class ImageNetBase(torchvision.datasets.ImageFolder):
         return img, label, uq_idx
 
 
-# def subsample_dataset(dataset, idxs):
-#
-#     imgs_ = []
-#     for i in idxs:
-#         imgs_.append(dataset.imgs[i])
-#     dataset.imgs = imgs_
-#
-#     samples_ = []
-#     for i in idxs:
-#         samples_.append(dataset.samples[i])
-#     dataset.samples = samples_
-#
-#     # dataset.imgs = [x for i, x in enumerate(dataset.imgs) if i in idxs]
-#     # dataset.samples = [x for i, x in enumerate(dataset.samples) if i in idxs]
-#
-#     dataset.targets = np.array(dataset.targets)[idxs].tolist()
-#     dataset.uq_idxs = dataset.uq_idxs[idxs]
-#
-#     return dataset
-
 def subsample_dataset(dataset, idxs):
-    import numpy as np
-    # 统一为一维整数数组
-    idxs = np.asarray(idxs)
-    if idxs.ndim != 1:
-        idxs = idxs.ravel()
-    if not np.issubdtype(idxs.dtype, np.integer):
-        # 安全转换（若有小数必须确保是源自整数计算）
-        idxs = idxs.astype(np.int64)
-    # 去重并保持顺序（可选）
-    # _, unique_pos = np.unique(idxs, return_index=True)
-    # idxs = idxs[np.sort(unique_pos)]
+    idxs = np.array(idxs, dtype=np.int64)  # 保证索引为整数类型
 
-    dataset.targets = np.asarray(dataset.targets)[idxs].tolist()
-    # dataset.samples / dataset.imgs 结构通常为 [(path, target), ...]
-    dataset.samples = [dataset.samples[i] for i in idxs]
-    if hasattr(dataset, "imgs"):
-        dataset.imgs = dataset.samples
+    imgs_ = []
+    for i in idxs:
+        imgs_.append(dataset.imgs[i])
+    dataset.imgs = imgs_
+
+    samples_ = []
+    for i in idxs:
+        samples_.append(dataset.samples[i])
+    dataset.samples = samples_
+
+    dataset.targets = np.array(dataset.targets)[idxs].tolist()
+    dataset.uq_idxs = dataset.uq_idxs[idxs]
+
     return dataset
 
 
@@ -157,7 +135,24 @@ def get_imagenet_100_datasets(train_transform, test_transform, config_dict, trai
 
     # Init entire training set
     imagenet_training_set = ImageNetBase(root=os.path.join(imagenet_root, 'train'), transform=train_transform)
-    whole_training_set = subsample_classes(imagenet_training_set, include_classes=subsampled_100_classes)
+
+    # 获取实际存在的类别
+    actual_classes = sorted(list(set(imagenet_training_set.targets)))
+    print(f'数据集实际包含 {len(actual_classes)} 个类别')
+
+    if len(actual_classes) < 100:
+        raise ValueError(f"数据集只有{len(actual_classes)}个类别，不足100个！")
+
+    # 使用实际的类别，不需要重新采样
+    # 直接使用0-99作为新的类别ID
+    subsampled_100_classes = np.array(actual_classes[:100])  # 取前100个
+    print(f'使用数据集中的前100个类别')
+
+    # 创建映射：原始类别ID -> 新的0-99 ID
+    cls_map = {old_id: new_id for new_id, old_id in enumerate(subsampled_100_classes)}
+
+    whole_training_set = deepcopy(imagenet_training_set)
+    # 修改这部分 ↑↑↑
 
     # Reset dataset   # NOTE!!!
     whole_training_set.samples = [(s[0], cls_map[s[1]]) for s in whole_training_set.samples]
@@ -193,10 +188,11 @@ def get_imagenet_100_datasets(train_transform, test_transform, config_dict, trai
 
     # Get test set for all classes
     test_dataset = ImageNetBase(root=os.path.join(imagenet_root, 'val'), transform=test_transform)
-    test_dataset = subsample_classes(test_dataset, include_classes=subsampled_100_classes)
+    # test_dataset = subsample_classes(test_dataset, include_classes=subsampled_100_classes)
 
     # Reset test set   # NOTE!!!
-    test_dataset.samples = [(s[0], cls_map[s[1]]) for s in test_dataset.samples]
+    test_dataset.samples = [(s[0], cls_map.get(s[1], -1)) for s in test_dataset.samples]
+    test_dataset.samples = [(s[0], s[1]) for s in test_dataset.samples if s[1] != -1]  # 过滤掉不存在的类别
     test_dataset.targets = [s[1] for s in test_dataset.samples]
     test_dataset.uq_idxs = np.array(range(len(test_dataset)))
     test_dataset.target_transform = None
@@ -277,15 +273,156 @@ def get_imagenet_100_datasets(train_transform, test_transform, config_dict, trai
 
 
 # if __name__ == '__main__':
-
-#     all_datasets, novel_targets_shuffle = get_imagenet_100_datasets(None, None, dataset_split_config_dict['imagenet_100'],
-#                                                                     range(50), 0.8, False, False, 0)
-
+#
+#     # all_datasets, novel_targets_shuffle = get_imagenet_100_datasets(None, None, dataset_split_config_dict['imagenet_100'],
+#     #                                                                range(50), 0.8, False, False, 0)
+#
 #     # print(type(all_datasets['offline_train_dataset']))   # <class '__main__.ImageNetBase'>
 #     # print(type(all_datasets['offline_test_dataset']))   # <class '__main__.ImageNetBase'>
 #     # print(type(all_datasets['online_old_dataset_unlabelled_list'][0]))   # <class '__main__.ImageNetBase'>
 #     # print(type(all_datasets['online_novel_dataset_unlabelled_list'][0]))   # <class '__main__.ImageNetBase'>
 #     # print(type(all_datasets['online_test_dataset_list'][0]))   # <class '__main__.ImageNetBase'>
+#
+#     import os
+#     from collections import Counter
+#
+#     print("=" * 80)
+#     print("ImageNet 数据集验证")
+#     print("=" * 80)
+#
+#     # 1. 检查路径是否存在
+#     print(f"\n配置的imagenet_root: {imagenet_root}")
+#     print(f"路径是否存在: {os.path.exists(imagenet_root)}")
+#
+#     train_path = os.path.join(imagenet_root, 'train')
+#     val_path = os.path.join(imagenet_root, 'val')
+#
+#     print(f"\n训练集路径: {train_path}")
+#     print(f"训练集是否存在: {os.path.exists(train_path)}")
+#
+#     print(f"\n验证集路径: {val_path}")
+#     print(f"验证集是否存在: {os.path.exists(val_path)}")
+#
+#     # 2. 检查类别数量
+#     if os.path.exists(train_path):
+#         train_classes = sorted([d for d in os.listdir(train_path)
+#                                 if os.path.isdir(os.path.join(train_path, d))])
+#         print(f"\n训练集类别数量: {len(train_classes)}")
+#         print(f"前10个类别: {train_classes[:10]}")
+#
+#         # 3. 统计每个类别的图片数量
+#         print("\n" + "=" * 80)
+#         print("统计每个类别的样本数量（训练集）")
+#         print("=" * 80)
+#
+#         class_counts = {}
+#         for class_name in train_classes:
+#             class_path = os.path.join(train_path, class_name)
+#             images = [f for f in os.listdir(class_path)
+#                       if f.lower().endswith(('.jpeg', '.jpg', '.png'))]
+#             class_counts[class_name] = len(images)
+#
+#         # 统计信息
+#         counts_list = list(class_counts.values())
+#         print(f"\n样本数量统计:")
+#         print(f"  最小值: {min(counts_list)}")
+#         print(f"  最大值: {max(counts_list)}")
+#         print(f"  平均值: {sum(counts_list) / len(counts_list):.2f}")
+#         print(f"  中位数: {sorted(counts_list)[len(counts_list) // 2]}")
+#
+#         # 显示样本数量分布
+#         count_distribution = Counter(counts_list)
+#         print(f"\n样本数量分布（前10种）:")
+#         for count, num_classes in sorted(count_distribution.items(), reverse=True)[:10]:
+#             print(f"  {count}张图片: {num_classes}个类别")
+#
+#         # 显示前20个类别的详细信息
+#         print(f"\n前20个类别的样本数量:")
+#         for i, (class_name, count) in enumerate(list(class_counts.items())[:20]):
+#             print(f"  {i + 1}. {class_name}: {count}张")
+#
+#         # 警告信息
+#         print("\n" + "=" * 80)
+#         if len(train_classes) < 1000:
+#             print("⚠️  警告：训练集类别数量不足1000！")
+#             print("   ImageNet-100需要从完整的1000类中随机采样。")
+#             print("   请确保下载了完整的ImageNet-1K数据集。")
+#         else:
+#             print("✅ 训练集类别数量正确（1000类）")
+#
+#         min_samples = min(counts_list)
+#         if min_samples < 300:
+#             print(f"⚠️  警告：某些类别样本数量过少（最少{min_samples}张）")
+#             print("   这可能导致数据划分时样本不足的问题。")
+#         else:
+#             print(f"✅ 所有类别样本数量充足（最少{min_samples}张）")
+#     else:
+#         print("\n❌ 错误：训练集路径不存在！")
+#         print("   请检查config.py中的imagenet_root配置")
+#
+#     # 4. 检查验证集
+#     if os.path.exists(val_path):
+#         val_classes = sorted([d for d in os.listdir(val_path)
+#                               if os.path.isdir(os.path.join(val_path, d))])
+#         print(f"\n验证集类别数量: {len(val_classes)}")
+#
+#         # 统计验证集样本数
+#         val_class_counts = {}
+#         for class_name in val_classes[:20]:  # 只检查前20个以节省时间
+#             class_path = os.path.join(val_path, class_name)
+#             images = [f for f in os.listdir(class_path)
+#                       if f.lower().endswith(('.jpeg', '.jpg', '.png'))]
+#             val_class_counts[class_name] = len(images)
+#
+#         if val_class_counts:
+#             avg_val_samples = sum(val_class_counts.values()) / len(val_class_counts)
+#             print(f"验证集平均样本数（前20个类别）: {avg_val_samples:.2f}")
+#     else:
+#         print("\n❌ 错误：验证集路径不存在！")
+#
+#     print("\n" + "=" * 80)
+#
+#     # 5. 测试数据加载（如果路径都正确）
+#     if os.path.exists(train_path) and len(train_classes) >= 100:
+#         print("\n开始测试数据集加载...")
+#         try:
+#             all_datasets, novel_targets_shuffle = get_imagenet_100_datasets(
+#                 None, None,
+#                 dataset_split_config_dict['imagenet_100'],
+#                 range(50), 0.5, False, False, 0
+#             )
+#
+#             print("\n✅ 数据集加载成功！")
+#             print("\n数据集大小:")
+#             print(f"  离线训练集: {len(all_datasets['offline_train_dataset'])} 样本")
+#             print(f"  离线测试集: {len(all_datasets['offline_test_dataset'])} 样本")
+#
+#             print("\n  在线旧类别未标记样本（每个会话）:")
+#             for i, dataset in enumerate(all_datasets['online_old_dataset_unlabelled_list']):
+#                 print(f"    会话 {i + 1}: {len(dataset)} 样本")
+#
+#             print("\n  在线新类别未标记样本（每个会话）:")
+#             for i, dataset in enumerate(all_datasets['online_novel_dataset_unlabelled_list']):
+#                 print(f"    会话 {i + 1}: {len(dataset)} 样本")
+#
+#             print("\n  在线测试集（每个会话）:")
+#             for i, dataset in enumerate(all_datasets['online_test_dataset_list']):
+#                 print(f"    会话 {i + 1}: {len(dataset)} 样本")
+#
+#             print(f"\n  采样的100个类别ID: {sorted(novel_targets_shuffle.tolist() + list(range(50)))[:20]}...")
+#
+#         except Exception as e:
+#             print(f"\n❌ 数据集加载失败！")
+#             print(f"错误信息: {str(e)}")
+#             import traceback
+#
+#             traceback.print_exc()
+#     else:
+#         print("\n⚠️  跳过数据集加载测试（路径不存在或类别数不足）")
+#
+#     print("\n" + "=" * 80)
+#     print("验证完成")
+#     print("=" * 80)
 
 
 #     z = 0

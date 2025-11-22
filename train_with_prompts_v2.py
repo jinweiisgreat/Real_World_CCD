@@ -17,10 +17,14 @@ from data.augmentations import get_transform
 from data.get_datasets import get_class_splits, ContrastiveLearningViewGenerator, get_datasets
 
 from models.utils_simgcd import DINOHead, SupConLoss, info_nce_logits, DistillLoss
-from models.utils_simgcd_pro_with_prompt import get_kmeans_centroid_for_new_head
-from models.utils_proto_aug_with_prompt import ProtoAugManager
+from models.utils_simgcd_pro_with_prompt_v2 import get_kmeans_centroid_for_new_head
+from models.utils_proto_aug_with_prompt_v2 import ProtoAugManager
 from models import vision_transformer as vits
 from config import dino_pretrain_path, exp_root
+
+from sklearn.metrics import confusion_matrix
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 # 导入新的增强模块
 from models.utils_prompts_enhance_v2 import PromptsEnhancer, create_prompts_enhancer
@@ -132,7 +136,7 @@ def train_offline(student, prompts_enhancer, train_loader, test_loader, args):
             loss = 0
             loss += (1 - args.sup_weight) * cluster_loss + args.sup_weight * cls_loss
             loss += (1 - args.sup_weight) * contrastive_loss + args.sup_weight * sup_con_loss
-            loss += args.prompts_weight * prompts_loss
+            # loss += args.prompts_weight * prompts_loss
 
             # logs
             pstr = ''
@@ -140,13 +144,13 @@ def train_offline(student, prompts_enhancer, train_loader, test_loader, args):
             pstr += f'cluster_loss: {cluster_loss.item():.4f} '
             pstr += f'sup_con_loss: {sup_con_loss.item():.4f} '
             pstr += f'contrastive_loss: {contrastive_loss.item():.4f} '
-            pstr += f'prompts_loss: {prompts_loss.item():.4f} '
+            # pstr += f'prompts_loss: {prompts_loss.item():.4f} '
 
             # 详细的prompts损失信息
-            if prompts_enhancer is not None and batch_idx % (args.print_freq * 5) == 0:
-                pstr += f'[key_div: {prompts_losses.get("key_diversity_loss", 0):.4f}, '
-                pstr += f'val_div: {prompts_losses.get("value_diversity_loss", 0):.4f}, '
-                pstr += f'consistency: {prompts_losses.get("consistency_loss", 0):.4f}] '
+            # if prompts_enhancer is not None and batch_idx % (args.print_freq * 5) == 0:
+            #     pstr += f'[key_div: {prompts_losses.get("key_diversity_loss", 0):.4f}, '
+            #     pstr += f'val_div: {prompts_losses.get("value_diversity_loss", 0):.4f}, '
+            #     pstr += f'consistency: {prompts_losses.get("consistency_loss", 0):.4f}] '
 
             loss_record.update(loss.item(), class_labels.size(0))
             optimizer.zero_grad()
@@ -353,7 +357,7 @@ def train_online(student, student_pre, proto_aug_manager, prompts_enhancer, trai
             loss += 1 * contrastive_loss
             loss += args.proto_aug_weight * proto_aug_loss
             loss += args.feat_distill_weight * feat_distill_loss
-            loss += args.prompts_weight * prompts_loss
+            # loss += args.prompts_weight * prompts_loss
 
             # logs
             pstr = ''
@@ -364,13 +368,13 @@ def train_online(student, student_pre, proto_aug_manager, prompts_enhancer, trai
             pstr += f'contrastive_loss: {contrastive_loss.item():.4f} '
             pstr += f'proto_aug_loss: {proto_aug_loss.item():.4f} '
             pstr += f'feat_distill_loss: {feat_distill_loss.item():.4f} '
-            pstr += f'prompts_loss: {prompts_loss.item():.4f} '
+            # pstr += f'prompts_loss: {prompts_loss.item():.4f} '
 
             # 详细的Key-Value损失信息
-            if prompts_enhancer is not None and batch_idx % (args.print_freq * 3) == 0:
-                pstr += f'[KV_losses - key_div: {prompts_losses.get("key_diversity_loss", torch.tensor(0)):.4f}, '
-                pstr += f'val_div: {prompts_losses.get("value_diversity_loss", torch.tensor(0)):.4f}, '
-                pstr += f'consistency: {prompts_losses.get("consistency_loss", torch.tensor(0)):.4f}] '
+            # if prompts_enhancer is not None and batch_idx % (args.print_freq * 3) == 0:
+            #     pstr += f'[KV_losses - key_div: {prompts_losses.get("key_diversity_loss", torch.tensor(0)):.4f}, '
+            #     pstr += f'val_div: {prompts_losses.get("value_diversity_loss", torch.tensor(0)):.4f}, '
+            #     pstr += f'consistency: {prompts_losses.get("consistency_loss", torch.tensor(0)):.4f}] '
 
             loss_record.update(loss.item(), class_labels.size(0))
             optimizer.zero_grad()
@@ -480,6 +484,41 @@ def test_online(model, test_loader, epoch, save_name, args):
 
     preds = np.concatenate(preds)
     targets = np.concatenate(targets)
+
+    if epoch == args.epochs_online_per_session - 1:
+        # Get all classes present in the data
+        all_classes = sorted(list(set(targets.tolist() + preds.tolist())))
+
+        # Generate confusion matrix
+        cm = confusion_matrix(targets, preds, labels=all_classes)
+
+        # Create the plot
+        plt.figure(figsize=(12, 10))
+        sns.heatmap(cm, fmt='d', cmap='Blues',
+                    xticklabels=all_classes,
+                    yticklabels=all_classes)
+
+        plt.xlabel('Prediction')
+        plt.ylabel('Ground Truth')
+        plt.title(f'Confusion Matrix (Epoch {epoch})')
+
+        # Determine which session we're in
+        current_session = 1
+        if hasattr(args, 'num_seen_classes') and hasattr(args, 'num_labeled_classes') and hasattr(args,
+                                                                                                  'num_novel_class_per_session'):
+            if args.num_seen_classes > args.num_labeled_classes:
+                completed_sessions = (
+                                             args.num_seen_classes - args.num_labeled_classes) // args.num_novel_class_per_session
+                current_session = completed_sessions + 1
+
+        session_str = f"session_{current_session}"
+
+        # Save confusion matrix
+        conf_matrix_path = os.path.join(args.log_dir, f'confusion_matrix_{session_str}.png')
+        plt.tight_layout()
+        plt.savefig(conf_matrix_path)
+        plt.close()
+        args.logger.info(f"Confusion matrix saved to: {conf_matrix_path}")
 
     # 计算评估指标
     all_acc, old_acc, new_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_hard,
@@ -770,13 +809,12 @@ if __name__ == "__main__":
             # 加载上一会话或离线会话的检查点
             args.logger.info('loading checkpoints of model_pre...')
             if session == 0:
-                # 第一个会话：加载离线模型
                 projector_pre = DINOHead(in_dim=args.feat_dim, out_dim=args.num_labeled_classes,
                                          nlayers=args.num_mlp_layers)
 
-                # 为离线模型创建非增强的backbone
-                backbone_pre = vits.__dict__['vit_base']()
-                enhanced_backbone_pre = create_enhanced_backbone(backbone_pre, prompts_enhancer)
+                # 创建基础backbone并应用相同的增强
+                backbone_base = vits.__dict__['vit_base']()
+                enhanced_backbone_pre = create_enhanced_backbone(backbone_base, prompts_enhancer)
                 model_pre = nn.Sequential(enhanced_backbone_pre, projector_pre)
 
                 if args.load_offline_id is not None:

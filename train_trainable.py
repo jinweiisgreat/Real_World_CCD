@@ -668,11 +668,11 @@ def test_online(model, test_loader, epoch, save_name, current_session, args):
     """
     改进的在线测试函数，支持prompt效果分析
     """
-    assert isinstance(model, PromptEnhancedModel), f"Expected PromptEnhancedModel but got {type(model)}"
 
     model.eval()
 
     preds, targets = [], []
+    features_list = []
     mask_hard = np.array([])
     mask_soft = np.array([])
 
@@ -700,7 +700,10 @@ def test_online(model, test_loader, epoch, save_name, current_session, args):
 
         with torch.no_grad():
             # 直接使用PromptEnhancedModel的forward方法
-            _, logits = model(images)
+            # _, logits = model(images)
+            features, logits = model(images)
+            features_list.append(features.cpu().numpy())
+
 
             batch_preds = logits.argmax(1).cpu().numpy()
             preds.append(batch_preds)
@@ -718,6 +721,7 @@ def test_online(model, test_loader, epoch, save_name, current_session, args):
 
     preds = np.concatenate(preds)
     targets = np.concatenate(targets)
+    features_array = np.concatenate(features_list, axis=0)
 
     # 输出prompt效果统计
     if total_effectiveness_stats['total_samples'] > 0:
@@ -735,43 +739,54 @@ def test_online(model, test_loader, epoch, save_name, current_session, args):
                          f'Helped: {total_effectiveness_stats["samples_helped"]}, '
                          f'Hurt: {total_effectiveness_stats["samples_hurt"]}')
 
-    # 生成可视化（在最后一个epoch）
-    if hasattr(args, 'log_dir') and epoch == args.epochs_online_per_session - 1:
-        try:
-            # 创建可视化目录
-            vis_dir = os.path.join(args.log_dir, 'visualizations')
-            os.makedirs(vis_dir, exist_ok=True)
+    # 生成可视化
+    # if hasattr(args, 'log_dir') and epoch in [0, 4, args.epochs_online_per_session - 1] :
+    if epoch in [4, args.epochs_online_per_session - 1]:
+        # 创建可视化目录
+        vis_dir = os.path.join(args.log_dir, 'visualizations')
+        os.makedirs(vis_dir, exist_ok=True)
 
-            # 生成混淆矩阵
-            from sklearn.metrics import confusion_matrix
-            import matplotlib.pyplot as plt
-            import seaborn as sns
+        # 生成混淆矩阵
+        from sklearn.metrics import confusion_matrix
+        import matplotlib.pyplot as plt
+        import seaborn as sns
 
-            # 获取数据中存在的所有类别
-            all_classes = sorted(list(set(targets.tolist() + preds.tolist())))
+        # 获取数据中存在的所有类别
+        all_classes = sorted(list(set(targets.tolist() + preds.tolist())))
 
-            # 生成混淆矩阵
-            cm = confusion_matrix(targets, preds, labels=all_classes)
+        # 生成混淆矩阵
+        cm = confusion_matrix(targets, preds, labels=all_classes)
 
-            # 创建图表
-            plt.figure(figsize=(12, 10))
-            sns.heatmap(cm, fmt='d', cmap='Blues',
-                        xticklabels=all_classes,
-                        yticklabels=all_classes)
+        # 创建图表
+        plt.figure(figsize=(12, 10))
+        # sns.heatmap(cm, fmt='d', cmap='Blues',
+        #             xticklabels=all_classes,
+        #             yticklabels=all_classes)
+        #
+        # plt.xlabel('Prediction')
+        # plt.ylabel('Ground Truth')
+        # plt.title(f'Confusion Matrix - Session {current_session}')
 
-            plt.xlabel('Prediction')
-            plt.ylabel('Ground Truth')
-            plt.title(f'Confusion Matrix - Session {current_session}')
+        im = plt.imshow(cm, cmap='viridis', interpolation='nearest')  # 黄蓝配色
+        plt.title(f'Confusion Matrix - Session {current_session}')
+        plt.colorbar(im, fraction=0.046, pad=0.04)
+        plt.xlabel('Prediction')
+        plt.ylabel('Ground Truth')
+        plt.xticks(np.arange(0, len(all_classes), 5), all_classes[::5])
+        plt.yticks(np.arange(0, len(all_classes), 5), all_classes[::5])
+        plt.tight_layout()
 
-            # 保存混淆矩阵
-            conf_matrix_path = os.path.join(vis_dir, f'confusion_matrix_session_{current_session}.png')
-            plt.tight_layout()
-            plt.savefig(conf_matrix_path)
-            plt.close()
-            args.logger.info(f"Confusion matrix saved to: {conf_matrix_path}")
+        # 保存混淆矩阵
+        conf_matrix_path = os.path.join(vis_dir, f'confusion_matrix_session_{current_session}.png')
+        plt.tight_layout()
+        plt.savefig(conf_matrix_path)
+        plt.close()
+        args.logger.info(f"Confusion matrix saved to: {conf_matrix_path}")
 
-        except Exception as e:
-            args.logger.warning(f"Could not generate visualizations: {str(e)}")
+        # 生成t-SNE可视化
+        visualize_tsne(features_array, targets, current_session, args)
+
+        visualize_prediction_distribution(class_prediction_counts, current_session, args)
 
     # 计算评估指标
     all_acc, old_acc, new_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_hard,
@@ -790,6 +805,127 @@ def test_online(model, test_loader, epoch, save_name, current_session, args):
     return all_acc, old_acc, new_acc, all_acc_soft, seen_acc, unseen_acc
 
 
+def visualize_tsne(features, labels, current_session, args):
+    """
+    t-SNE特征空间可视化
+    """
+    from sklearn.manifold import TSNE
+    import matplotlib.pyplot as plt
+
+    vis_dir = os.path.join(args.log_dir, 'visualizations')
+    os.makedirs(vis_dir, exist_ok=True)
+
+    args.logger.info(f"Generating t-SNE visualization for Session {current_session}...")
+
+    # t-SNE降维
+    tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(features) - 1))
+    features_2d = tsne.fit_transform(features)
+
+    # 区分old和new类别
+    num_old_classes = len(args.train_classes)
+    num_seen_classes = args.num_seen_classes
+
+    unique_labels = np.unique(labels)
+    colors = plt.cm.tab20(np.linspace(0, 1, len(unique_labels)))
+
+    # 正方形画布
+    plt.figure(figsize=(15, 15))
+
+    for idx, label in enumerate(unique_labels):
+        mask = labels == label
+
+        if label < num_old_classes:
+            marker = 'o'  # Old类：圆形
+        elif label < num_seen_classes:
+            marker = 'o'  # Seen类：圆形
+        else:
+            marker = '^'  # Unseen类：三角形
+
+        plt.scatter(features_2d[mask, 0], features_2d[mask, 1],
+                    c=[colors[idx]], marker=marker, s=30, alpha=1.0,
+                    edgecolors='none')
+
+    plt.title(f'Feature Space (t-SNE) - Session {current_session}', fontsize=14, pad=20)
+    plt.xlabel('t-SNE Dimension 1', fontsize=12)
+    plt.ylabel('t-SNE Dimension 2', fontsize=12)
+    # plt.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+    plt.tight_layout()
+    plt.savefig(os.path.join(vis_dir, f'tsne_session_{current_session}.png'),
+                dpi=300, bbox_inches='tight')
+    plt.close()
+
+    args.logger.info(f"t-SNE visualization saved to {vis_dir}")
+
+def visualize_prediction_distribution(class_prediction_counts, current_session, args):
+    """
+    可视化预测分布 - SCI专业风格，单栏宽度，全局排序
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    vis_dir = os.path.join(args.log_dir, 'visualizations')
+    os.makedirs(vis_dir, exist_ok=True)
+
+    # 归一化到0-1
+    total_predictions = class_prediction_counts.sum()
+    if total_predictions > 0:
+        probs = class_prediction_counts / total_predictions
+    else:
+        probs = class_prediction_counts
+
+    # 标记每个类是old还是new
+    num_old_classes = args.num_seen_classes
+    is_old = np.array([i < num_old_classes for i in range(len(probs))])
+
+    # 全局排序（从高到低）
+    sorted_indices = np.argsort(probs)[::-1]
+    probs_sorted = probs[sorted_indices]
+    is_old_sorted = is_old[sorted_indices]
+
+    # SCI专业配色
+    colors = ['#1f77b4' if old else '#d62728' for old in is_old_sorted]
+
+    # 创建图表 - 单栏宽度
+    fig, ax = plt.subplots(figsize=(3.5, 2.5), dpi=100)
+
+    # 设置淡蓝灰色背景
+    ax.set_facecolor('#fafbfc')
+
+    x = np.arange(len(probs_sorted))
+    ax.bar(x, probs_sorted, color=colors, width=0.8, edgecolor='none', alpha=0.8)
+
+    # 设置坐标轴标签
+    ax.set_xlabel('Class Index (sorted by prediction frequency)', fontsize=9)
+    ax.set_ylabel('Prediction Probability', fontsize=9, fontweight='bold')
+
+    # 网格线
+    ax.grid(True, linestyle='--', alpha=0.4, linewidth=0.8, axis='y')
+    ax.set_axisbelow(True)
+
+    # 设置刻度
+    ax.tick_params(direction='out', length=4, width=1.2, labelsize=8)
+
+    # 图例 - SCI风格
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor='#1f77b4', label='Old classes', alpha=0.8),
+        Patch(facecolor='#d62728', label='New classes', alpha=0.8)
+    ]
+    ax.legend(handles=legend_elements, loc='upper right', frameon=True,
+              fancybox=False, shadow=False, framealpha=0.9,
+              edgecolor='black', fontsize=8)
+
+    # 边框
+    for spine in ax.spines.values():
+        spine.set_edgecolor('black')
+        spine.set_linewidth(1.2)
+
+    plt.tight_layout()
+    save_path = os.path.join(vis_dir, f'prediction_distribution_session_{current_session}.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+
+    args.logger.info(f"Prediction distribution saved to {save_path}")
 '''====================================================================================================================='''
 
 if __name__ == "__main__":
@@ -1137,7 +1273,7 @@ if __name__ == "__main__":
                                 new_state_dict['projector' + k[1:]] = v
                         load_dict['model'] = new_state_dict
 
-                    model_pre.load_state_dict(load_dict['model'])
+                    model_pre.load_state_dict(load_dict['model'],strict=False)
                     args.logger.info('successfully loaded checkpoints!')
 
             else:  # session > 0
@@ -1153,7 +1289,7 @@ if __name__ == "__main__":
                 load_dir_online = args.model_path[:-3] + '_session-' + str(session) + f'_best.pt'
                 args.logger.info('loading checkpoints from last online session: ' + load_dir_online)
                 load_dict = torch.load(load_dir_online)
-                model_pre.load_state_dict(load_dict['model'])
+                model_pre.load_state_dict(load_dict['model'],strict=False)
                 args.logger.info('successfully loaded checkpoints!')
             ####################################################################################################################
 

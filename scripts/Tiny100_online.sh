@@ -5,7 +5,7 @@ set -e
 set -x
 
 CUDA_VISIBLE_DEVICES=0 python train_happy.py \
-    --dataset_name 'cub' \
+    --dataset_name 'tiny_imagenet' \
     --batch_size 128 \
     --transform 'imagenet' \
     --warmup_teacher_temp 0.05 \
@@ -23,15 +23,15 @@ CUDA_VISIBLE_DEVICES=0 python train_happy.py \
     --num_old_classes 100 \
     --prop_train_labels 0.8 \
     --train_session online \
-    --epochs_online_per_session 20 \
-    --continual_session_num 10 \
-    --online_novel_unseen_num 25 \
-    --online_old_seen_num 5 \
-    --online_novel_seen_num 5 \
+    --epochs_online_per_session 50 \
+    --continual_session_num 5 \
+    --online_novel_unseen_num 400 \
+    --online_old_seen_num 25 \
+    --online_novel_seen_num 25 \
     --init_new_head \
-    --load_offline_id Old100_Ratio0.8_20251015-111126 \
+    --load_offline_id Old100_Ratio0.8_20251010-155123 \
     --shuffle_classes \
-    --seed 0
+    --seed 0 \
 #    --prompt_pool \
 #    --enable_prompt_training
 
