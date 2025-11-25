@@ -32,7 +32,7 @@ set -x
    --load_offline_id Old50_Ratio0.8_20250527-153553 \
    --shuffle_classes \
    --seed 0
-   --load_offline_id Old50_Ratio0.8_20250605-203249 \
+   # --load_offline_id Old50_Ratio0.8_20250605-203249 \
    --prompt_pool \
    --enable_prompt_training
 
