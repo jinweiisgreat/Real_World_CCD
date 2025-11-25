@@ -60,12 +60,9 @@ setproctitle.setproctitle("xiao wei's python process")
 
 
 def train_offline(student, train_loader, test_loader, args):
-    """
-    改进的离线训练函数，支持prompt pool的任务驱动训练
-    """
     assert isinstance(student, PromptEnhancedModel), f"Expected PromptEnhancedModel but got {type(student)}"
 
-    # 获取所有需要优化的参数
+
     model_params = list(student.backbone.parameters()) + list(student.projector.parameters())
     prompt_params = student.get_prompt_parameters()
 
@@ -74,16 +71,16 @@ def train_offline(student, train_loader, test_loader, args):
     else:
         args.logger.info("No prompt parameters found, using only model parameters")
 
-    # 使用分组参数策略
+
     params_groups = get_params_groups(student)
 
-    # 如果有prompt参数，单独添加到优化器，使用更积极的学习率
+    
     if prompt_params:
-        prompt_lr = args.lr * 0.2  # 提高prompt学习率到主学习率的0.2倍
+        prompt_lr = args.lr * 0.2  
         params_groups.append({
             'params': prompt_params,
             'lr': prompt_lr,
-            'weight_decay': 0.0  # prompt不使用weight decay
+            'weight_decay': 0.0  #
         })
         args.logger.info(f"Added prompt parameters with lr={prompt_lr}")
 
@@ -117,18 +114,18 @@ def train_offline(student, train_loader, test_loader, args):
 
         for batch_idx, batch in enumerate(train_loader):
             images, class_labels, uq_idxs = batch
-            mask_lab = torch.ones_like(class_labels)  # 所有样本都是有标签的
+            mask_lab = torch.ones_like(class_labels)  
 
             class_labels, mask_lab = class_labels.cuda(non_blocking=True), mask_lab.cuda(non_blocking=True).bool()
             images = torch.cat(images, dim=0).cuda(non_blocking=True)
 
-            # 使用改进的forward方法，获取prompt损失和原始logits用于对比
+
             student_proj, student_out, prompt_losses, original_logits = student.forward_with_prompt_loss(
                 images, class_labels
             )
             teacher_out = student_out.detach()
 
-            # ========== 主任务损失计算 ==========
+            
             # clustering, sup
             sup_logits = torch.cat([f[mask_lab] for f in (student_out / 0.1).chunk(2)], dim=0)
             sup_labels = torch.cat([class_labels[mask_lab] for _ in range(2)], dim=0)
@@ -151,24 +148,23 @@ def train_offline(student, train_loader, test_loader, args):
             sup_con_labels = class_labels[mask_lab]
             sup_con_loss = SupConLoss()(student_proj_reshaped, labels=sup_con_labels)
 
-            # 主任务损失
+          
             main_loss = (1 - args.sup_weight) * cluster_loss + args.sup_weight * cls_loss
             main_loss += (1 - args.sup_weight) * contrastive_loss + args.sup_weight * sup_con_loss
 
-            # ========== Prompt损失计算 ==========
-            # 动态调整prompt权重：早期较小，随训练逐渐增加
+          
             prompt_weight_schedule = min(0.5, (epoch + 1) / (args.epochs_offline * 0.4))
             total_prompt_loss = prompt_weight_schedule * prompt_losses['total']
 
-            # 总损失
+            
             total_loss = main_loss + total_prompt_loss
 
-            # ========== 反向传播和优化 ==========
+           
             optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()
 
-            # 记录损失
+         
             loss_record.update(total_loss.item(), class_labels.size(0))
             prompt_loss_record.update(total_prompt_loss.item(), class_labels.size(0))
             main_loss_record.update(main_loss.item(), class_labels.size(0))
@@ -181,7 +177,7 @@ def train_offline(student, train_loader, test_loader, args):
         args.logger.info('Train Epoch: {} Avg Loss: {:.4f} Main Loss: {:.4f} Prompt Loss: {:.4f}'.format(
             epoch, loss_record.avg, main_loss_record.avg, prompt_loss_record.avg))
 
-        # 记录prompt pool信息
+        
         if student.prompt_pool is not None:
             prompt_info = student.prompt_pool_summary()
             args.logger.info(f'Prompt Pool: {prompt_info}')
@@ -191,10 +187,10 @@ def train_offline(student, train_loader, test_loader, args):
         all_acc_test, old_acc_test, _ = test_offline(student, test_loader, epoch=epoch, save_name='Test ACC', args=args)
         args.logger.info('Test Accuracies: All {:.4f} | Old {:.4f}'.format(all_acc_test, old_acc_test))
 
-        # 学习率调度
+   
         exp_lr_scheduler.step()
 
-        # 保存模型
+ 
         save_dict = {
             'model': student.state_dict(),
             'optimizer': optimizer.state_dict(),
@@ -214,10 +210,10 @@ def train_offline(student, train_loader, test_loader, args):
         args.logger.info(f'Metrics with best model on test set: Old: {best_test_acc_old:.4f}')
         args.logger.info('\n')
 
-    # 训练结束后创建prompt pool
+  
     args.logger.info("Creating prompt pool from offline training data...")
 
-    # 使用干净的数据加载器进行特征提取
+
     clean_dataset = deepcopy(train_loader.dataset)
     clean_dataset.transform = test_transform
     clean_loader = DataLoader(
@@ -228,7 +224,7 @@ def train_offline(student, train_loader, test_loader, args):
         pin_memory=False
     )
 
-    # 如果prompt pool还没有初始化，现在进行初始化
+   
     if args.prompt_pool.num_prompts == 0:
         prompt_pool_stats = args.prompt_pool.create_prompt_pool(
             model=student,
@@ -237,19 +233,18 @@ def train_offline(student, train_loader, test_loader, args):
             logger=args.logger
         )
     else:
-        # 如果已经有了prompt pool，进行更新
         prompt_pool_stats = args.prompt_pool.update_prompt_pool_incrementally(
             model=student,
             data_loader=clean_loader,
             logger=args.logger
         )
 
-    # 保存prompt pool
+ 
     prompt_pool_path = os.path.join(args.model_dir, 'prompt_pool.pt')
     args.prompt_pool.save_prompt_pool(prompt_pool_path)
     args.logger.info(f"Prompt pool saved to {prompt_pool_path}")
 
-    # 保存统计信息
+
     stats_path = os.path.join(args.model_dir, 'prompt_pool_stats.pt')
     torch.save({
         'prompt_pool_stats': prompt_pool_stats
@@ -259,9 +254,7 @@ def train_offline(student, train_loader, test_loader, args):
 
 
 def test_offline(model, test_loader, epoch, save_name, args):
-    """
-    改进的离线测试函数，支持prompt效果分析
-    """
+
     assert isinstance(model, PromptEnhancedModel), f"Expected PromptEnhancedModel but got {type(model)}"
 
     model.eval()
@@ -269,7 +262,6 @@ def test_offline(model, test_loader, epoch, save_name, args):
     preds, targets = [], []
     mask = np.array([])
 
-    # 用于统计prompt效果
     total_effectiveness_stats = {
         'samples_helped': 0,
         'samples_hurt': 0,
@@ -278,11 +270,11 @@ def test_offline(model, test_loader, epoch, save_name, args):
         'confidence_improvement': 0.0
     }
 
-    # 提取所有特征
+  
     for batch_idx, (images, label, _) in enumerate(tqdm(test_loader)):
         images = images.cuda(non_blocking=True)
         with torch.no_grad():
-            # 获取预测结果和效果分析
+           
             _, logits = model(images)
             preds.append(logits.argmax(1).cpu().numpy())
             targets.append(label.cpu().numpy())
@@ -292,7 +284,7 @@ def test_offline(model, test_loader, epoch, save_name, args):
     preds = np.concatenate(preds)
     targets = np.concatenate(targets)
 
-    # 输出prompt效果统计
+
     if total_effectiveness_stats['total_samples'] > 0:
         avg_accuracy_improvement = total_effectiveness_stats['accuracy_improvement'] / total_effectiveness_stats[
             'total_samples']
@@ -323,21 +315,19 @@ def test_offline(model, test_loader, epoch, save_name, args):
 
 
 def train_online(student, student_pre, proto_aug_manager, train_loader, test_loader, current_session, args):
-    """
-    改进的在线训练函数，支持prompt pool的任务驱动更新
-    """
+
     assert isinstance(student, PromptEnhancedModel), f"Expected PromptEnhancedModel but got {type(student)}"
     assert isinstance(student_pre, PromptEnhancedModel), f"Expected PromptEnhancedModel but got {type(student_pre)}"
 
-    # 加载prompt pool
+
     if hasattr(args, 'prompt_pool') and args.prompt_pool is not None:
         if current_session == 1:
-            # 第一个会话使用离线阶段的prompt pool
+          
             offline_model_dir = os.path.join(exp_root + '_offline', args.dataset_name, args.load_offline_id,
                                              'checkpoints')
             prompt_pool_path = os.path.join(offline_model_dir, 'prompt_pool.pt')
         else:
-            # 后续会话使用上一个会话更新后的prompt pool
+         
             prompt_pool_path = os.path.join(args.model_dir, f'prompt_pool_session_{current_session - 1}.pt')
 
         if os.path.exists(prompt_pool_path):
@@ -347,7 +337,7 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
         else:
             args.logger.warning(f"Prompt pool not found at {prompt_pool_path}")
 
-    # 获取所有需要优化的参数
+
     model_params = list(student.backbone.parameters()) + list(student.projector.parameters())
     prompt_params = student.get_prompt_parameters()
 
@@ -356,18 +346,10 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
     else:
         args.logger.info("No prompt parameters found, using only model parameters")
 
-    # 使用分组参数策略
+
     params_groups = get_params_groups(student)
 
-    # 在线阶段给prompt更高的学习率，让其快速适应新数据
-    # if prompt_params:
-    #     prompt_lr = args.lr * 0.8  # 在线阶段提高prompt学习率
-    #     params_groups.append({
-    #         'params': prompt_params,
-    #         'lr': prompt_lr,
-    #         'weight_decay': 0.0
-    #     })
-    #     args.logger.info(f"Added prompt parameters with lr={prompt_lr}")
+
 
     optimizer = SGD(params_groups, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
 
@@ -377,7 +359,6 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
         eta_min=args.lr * 1e-3,
     )
 
-    # 损失函数
     cluster_criterion = DistillLoss(
         args.warmup_teacher_temp_epochs,
         args.epochs_online_per_session,
@@ -386,7 +367,7 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
         args.teacher_temp,
     )
 
-    # 记录最佳精度
+   
     best_test_acc_all = 0
     best_test_acc_old = 0
     best_test_acc_new = 0
@@ -394,7 +375,7 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
     best_test_acc_seen = 0
     best_test_acc_unseen = 0
 
-    # 用于监控prompt效果
+
     online_prompt_effectiveness_history = []
 
     for epoch in range(args.epochs_online_per_session):
@@ -402,7 +383,7 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
         prompt_loss_record = AverageMeter()
         main_loss_record = AverageMeter()
 
-        # 用于统计prompt效果
+    
         epoch_effectiveness_stats = {
             'samples_helped': 0,
             'samples_hurt': 0,
@@ -414,27 +395,27 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
         student.train()
         student_pre.eval()
 
-        # 启用prompt学习
+     
         if student.prompt_pool is not None:
             student.enable_prompt_learning()
 
         for batch_idx, batch in enumerate(train_loader):
             images, class_labels, uq_idxs, _ = batch
-            mask_lab = torch.zeros_like(class_labels)  # 所有样本都是无标签的
+            mask_lab = torch.zeros_like(class_labels)  
 
             class_labels, mask_lab = class_labels.cuda(non_blocking=True), mask_lab.cuda(non_blocking=True).bool()
             images = torch.cat(images, dim=0).cuda(non_blocking=True)
 
-            # 使用改进的forward方法
+           
             student_proj, student_out, prompt_losses, original_logits = student.forward_with_prompt_loss(images,
                                                                                                          class_labels)
             teacher_out = student_out.detach()
 
-            # ========== 主任务损失计算 ==========
+            
             # clustering, unsup
             cluster_loss = cluster_criterion(student_out, teacher_out, epoch)
 
-            # 分组熵正则化
+            
             avg_probs = (student_out / 0.1).softmax(dim=1).mean(dim=0)
 
             # 1. inter old and new
@@ -457,18 +438,18 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             else:
                 me_max_loss_new_in = torch.tensor(0.0, device=args.device)
 
-            # 总熵损失
+            
             cluster_loss += args.memax_old_new_weight * me_max_loss_old_new + \
                             args.memax_old_in_weight * me_max_loss_old_in + args.memax_new_in_weight * me_max_loss_new_in
 
-            # 对比学习
+           
             contrastive_logits, contrastive_labels = info_nce_logits(features=student_proj)
             contrastive_loss = torch.nn.CrossEntropyLoss()(contrastive_logits, contrastive_labels)
 
-            # ProtoAug损失
+            
             proto_aug_loss = proto_aug_manager.compute_proto_aug_hardness_aware_loss(student)
 
-            # 特征蒸馏
+            
             feats = student.backbone(images)
             feats = torch.nn.functional.normalize(feats, dim=-1)
             with torch.no_grad():
@@ -477,26 +458,19 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
 
             feat_distill_loss = (feats - feats_pre).pow(2).sum() / len(feats)
 
-            # 主任务损失
+            
             main_loss = 1 * cluster_loss + 1 * contrastive_loss
             main_loss += args.proto_aug_weight * proto_aug_loss + args.feat_distill_weight * feat_distill_loss
 
             # ========== Prompt损失计算 ==========
-            # 在线阶段更积极地训练prompt
-            prompt_weight = min(1.0, (epoch + 1) / (args.epochs_online_per_session * 0.15))  # 更快达到最大权重
-            total_prompt_loss = prompt_weight * prompt_losses['total']
-
-            # 总损失
+            prompt_weight = min(1.0, (epoch + 1) / (args.epochs_online_per_session * 0.15))  
+            total_prompt_loss = prompt_weight * prompt_losses['total'] 
             total_loss = main_loss + total_prompt_loss
-
-            # ========== 效果统计 ==========
-
-            # ========== 反向传播和优化 ==========
             optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()
 
-            # 记录损失
+            
             loss_record.update(total_loss.item(), class_labels.size(0))
             prompt_loss_record.update(total_prompt_loss.item(), class_labels.size(0))
             main_loss_record.update(main_loss.item(), class_labels.size(0))
@@ -506,7 +480,7 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
                                  .format(epoch, batch_idx, len(train_loader), total_loss.item(),
                                          main_loss.item(), total_prompt_loss.item()))
 
-                # 输出预测比例信息
+               
                 new_true_ratio = len(class_labels[class_labels >= args.num_seen_classes]) / len(class_labels)
                 logits = student_out / 0.1
                 preds = logits.argmax(1)
@@ -517,8 +491,8 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
                     f'Pred new ratio: {new_pred_ratio:.4f} | '
                     f'Ground-truth new ratio: {new_true_ratio:.4f}')
 
-        # ========== Epoch总结 ==========
-        # 计算平均效果统计
+      
+    
         if epoch_effectiveness_stats['total_samples'] > 0:
             avg_accuracy_improvement = epoch_effectiveness_stats['accuracy_improvement'] / epoch_effectiveness_stats[
                 'total_samples']
@@ -545,7 +519,7 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
         args.logger.info('Train Epoch: {} Avg Loss: {:.4f} Main Loss: {:.4f} Prompt Loss: {:.4f}'.format(
             epoch, loss_record.avg, main_loss_record.avg, prompt_loss_record.avg))
 
-        # 记录prompt pool信息
+        
         if student.prompt_pool is not None:
             prompt_info = student.prompt_pool_summary()
             args.logger.info(f'Prompt Pool: {prompt_info}')
@@ -563,10 +537,9 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             'Test Accuracies (Soft): All {:.4f} | Seen {:.4f} | Unseen {:.4f}'.format(all_acc_soft_test, seen_acc_test,
                                                                                       unseen_acc_test))
 
-        # 学习率调度
         exp_lr_scheduler.step()
 
-        # 保存模型
+      
         save_dict = {
             'model': student.state_dict(),
             'optimizer': optimizer.state_dict(),
@@ -605,7 +578,6 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
     args.best_test_acc_seen_list.append(best_test_acc_seen)
     args.best_test_acc_unseen_list.append(best_test_acc_unseen)
 
-    # ========== 更新prompt pool ==========
     if hasattr(args, 'prompt_pool') and args.prompt_pool is not None:
         args.logger.info(f"Incrementally updating prompt pool after session {current_session}...")
 
@@ -620,14 +592,13 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             pin_memory=False
         )
 
-        # 获取当前会话的最佳模型
+      
         best_model_path = args.model_path[:-3] + '_session-' + str(current_session) + f'_best.pt'
-        best_model = student  # 默认使用当前模型
+        best_model = student  
 
         if os.path.exists(best_model_path):
             try:
                 state_dict = torch.load(best_model_path)['model']
-                # 创建临时模型用于特征提取
                 temp_enhanced_model = PromptEnhancedModel(
                     backbone=deepcopy(backbone),
                     projector=deepcopy(projector_cur),
@@ -641,7 +612,6 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             except Exception as e:
                 args.logger.warning(f"Failed to load best model: {e}")
 
-        # 增量更新prompt pool
         similarity_threshold = getattr(args, 'prompt_update_threshold', 0.8)
         ema_alpha = getattr(args, 'prompt_ema_alpha', 0.9)
 
@@ -653,12 +623,10 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
             logger=args.logger
         )
 
-        # 保存更新后的prompt pool
         prompt_pool_path = os.path.join(args.model_dir, f'prompt_pool_session_{current_session}.pt')
         args.prompt_pool.save_prompt_pool(prompt_pool_path)
         args.logger.info(f"Updated prompt pool saved to {prompt_pool_path}")
 
-        # 记录更新统计信息
         update_stats_path = os.path.join(args.model_dir, f'prompt_pool_update_stats_session_{current_session}.pt')
         torch.save({
             'update_stats': update_stats,
@@ -669,9 +637,6 @@ def train_online(student, student_pre, proto_aug_manager, train_loader, test_loa
 
 
 def test_online(model, test_loader, epoch, save_name, current_session, args):
-    """
-    改进的在线测试函数，支持prompt效果分析
-    """
     assert isinstance(model, PromptEnhancedModel), f"Expected PromptEnhancedModel but got {type(model)}"
 
     model.eval()
@@ -680,11 +645,11 @@ def test_online(model, test_loader, epoch, save_name, current_session, args):
     mask_hard = np.array([])
     mask_soft = np.array([])
 
-    # 预测分布统计
+  
     num_classes = args.num_labeled_classes + args.num_unlabeled_classes
     class_prediction_counts = np.zeros(num_classes)
 
-    # 用于统计prompt效果
+    
     total_effectiveness_stats = {
         'samples_helped': 0,
         'samples_hurt': 0,
@@ -694,7 +659,7 @@ def test_online(model, test_loader, epoch, save_name, current_session, args):
     }
 
     for batch_idx, batch in enumerate(tqdm(test_loader, desc="Evaluating")):
-        # 处理不同格式的数据加载器
+       
         if len(batch) == 2:
             images, label = batch
         elif len(batch) >= 3:
@@ -703,18 +668,15 @@ def test_online(model, test_loader, epoch, save_name, current_session, args):
         images = images.cuda(non_blocking=True)
 
         with torch.no_grad():
-            # 直接使用PromptEnhancedModel的forward方法
             _, logits = model(images)
 
             batch_preds = logits.argmax(1).cpu().numpy()
             preds.append(batch_preds)
             targets.append(label.cpu().numpy())
 
-            # 更新预测计数
             for pred in batch_preds:
                 class_prediction_counts[pred] += 1
 
-            # 创建不同评估指标的掩码
             mask_hard = np.append(mask_hard, np.array([True if x.item() in range(len(args.train_classes))
                                                        else False for x in label]))
             mask_soft = np.append(mask_soft, np.array([True if x.item() in range(args.num_seen_classes)
@@ -723,7 +685,6 @@ def test_online(model, test_loader, epoch, save_name, current_session, args):
     preds = np.concatenate(preds)
     targets = np.concatenate(targets)
 
-    # 输出prompt效果统计
     if total_effectiveness_stats['total_samples'] > 0:
         avg_accuracy_improvement = total_effectiveness_stats['accuracy_improvement'] / total_effectiveness_stats[
             'total_samples']
@@ -739,25 +700,20 @@ def test_online(model, test_loader, epoch, save_name, current_session, args):
                          f'Helped: {total_effectiveness_stats["samples_helped"]}, '
                          f'Hurt: {total_effectiveness_stats["samples_hurt"]}')
 
-    # 生成可视化（在最后一个epoch）
     if hasattr(args, 'log_dir') and epoch == args.epochs_online_per_session - 1:
         try:
-            # 创建可视化目录
             vis_dir = os.path.join(args.log_dir, 'visualizations')
             os.makedirs(vis_dir, exist_ok=True)
 
-            # 生成混淆矩阵
             from sklearn.metrics import confusion_matrix
             import matplotlib.pyplot as plt
             import seaborn as sns
 
-            # 获取数据中存在的所有类别
             all_classes = sorted(list(set(targets.tolist() + preds.tolist())))
 
-            # 生成混淆矩阵
             cm = confusion_matrix(targets, preds, labels=all_classes)
 
-            # 创建图表
+           
             plt.figure(figsize=(12, 10))
             sns.heatmap(cm, fmt='d', cmap='Blues',
                         xticklabels=all_classes,
@@ -767,7 +723,7 @@ def test_online(model, test_loader, epoch, save_name, current_session, args):
             plt.ylabel('Ground Truth')
             plt.title(f'Confusion Matrix - Session {current_session}')
 
-            # 保存混淆矩阵
+          
             conf_matrix_path = os.path.join(vis_dir, f'confusion_matrix_session_{current_session}.png')
             plt.tight_layout()
             plt.savefig(conf_matrix_path)
@@ -777,7 +733,7 @@ def test_online(model, test_loader, epoch, save_name, current_session, args):
         except Exception as e:
             args.logger.warning(f"Could not generate visualizations: {str(e)}")
 
-    # 计算评估指标
+    
     all_acc, old_acc, new_acc = log_accs_from_preds(y_true=targets, y_pred=preds, mask=mask_hard,
                                                     T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
                                                     args=args)
@@ -786,7 +742,7 @@ def test_online(model, test_loader, epoch, save_name, current_session, args):
                                                              T=epoch, eval_funcs=args.eval_funcs, save_name=save_name,
                                                              args=args)
 
-    # 记录结果摘要
+    
     args.logger.info(f"\nTest results summary (Session {current_session}, Epoch {epoch}):")
     args.logger.info(f"Hard metrics: All={all_acc:.4f}, Old={old_acc:.4f}, New={new_acc:.4f}")
     args.logger.info(f"Soft metrics: All={all_acc_soft:.4f}, Seen={seen_acc:.4f}, Unseen={unseen_acc:.4f}")
@@ -842,9 +798,6 @@ if __name__ == "__main__":
     parser.add_argument('--proto_aug_weight', type=float, default=1.0)
     parser.add_argument('--feat_distill_weight', type=float, default=1.0)
     parser.add_argument('--radius_scale', type=float, default=1.0)
-
-    '''hardness-aware sampling temperature'''
-    parser.add_argument('--hardness_temp', type=float, default=0.1)
 
     # Continual GCD params
     parser.add_argument('--num_old_classes', type=int, default=-1)
@@ -927,27 +880,27 @@ if __name__ == "__main__":
     state_dict = torch.load(dino_pretrain_path, map_location='cpu')
     backbone.load_state_dict(state_dict)
 
-    # 模型参数
+    
     args.image_size = 224
     args.feat_dim = 768
     args.num_mlp_layers = 3
     args.mlp_out_dim = args.num_labeled_classes
 
-    # 初始化可学习的prompt pool
+    
     args.prompt_pool = LearnablePromptPool(
         feature_dim=args.feat_dim,
-        similarity_threshold=0.65,  # 降低阈值，更容易匹配
-        community_ratio=1.2,  # 减少初始prompt数量，避免过度复杂
+        similarity_threshold=0.65,  
+        community_ratio=1.2,  
         device=device,
         max_prompts=args.max_prompts
     )
 
-    # 设置prompt pool的训练权重
+  
     args.prompt_pool.prompt_learning_weight = args.prompt_learning_weight
     args.prompt_pool.diversity_weight = args.prompt_diversity_weight
     args.prompt_pool.alignment_weight = args.prompt_alignment_weight
 
-    # 设置backbone哪些层需要微调
+  
     for m in backbone.parameters():
         m.requires_grad = False
 
@@ -1048,7 +1001,6 @@ if __name__ == "__main__":
 
         '''
         v5: ProtoAug Manager
-        初始化一个ProtoAugManager实例
         '''
         proto_aug_manager = ProtoAugManager(args.feat_dim, args.n_views * args.batch_size, args.hardness_temp,
                                             args.radius_scale, device, args.logger)
