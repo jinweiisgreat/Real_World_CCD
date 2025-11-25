@@ -4,7 +4,7 @@
 set -e
 set -x
 
-CUDA_VISIBLE_DEVICES=0 python train_happy.py \
+CUDA_VISIBLE_DEVICES=0 python train_cape.py \
     --dataset_name 'cub' \
     --batch_size 128 \
     --transform 'imagenet' \
