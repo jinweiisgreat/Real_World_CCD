@@ -4,8 +4,8 @@ set -e
 set -x
 
 # Run training script with parameters
-CUDA_VISIBLE_DEVICES=0 python train_happy.py \
-   --dataset_name 'CIFAR100' \
+CUDA_VISIBLE_DEVICES=0 python train_cape.py \
+   --dataset_name 'cifar100' \
    --batch_size 128 \
    --transform 'imagenet' \
    --lr 0.1 \
