@@ -4,76 +4,36 @@
 set -e
 set -x
 
-CUDA_VISIBLE_DEVICES=0 python train_happy.py \
-    --dataset_name 'cifar100' \
-    --batch_size 128 \
-    --transform 'imagenet' \
-    --warmup_teacher_temp 0.05 \
-    --teacher_temp 0.05 \
-    --warmup_teacher_temp_epochs 30\
-    --lr 0.01 \
-    --memax_old_new_weight 1 \
-    --memax_old_in_weight 1 \
-    --memax_new_in_weight 1 \
-    --proto_aug_weight 1 \
-    --feat_distill_weight 1 \
-    --radius_scale 1.0 \
-    --hardness_temp 0.1 \
-    --eval_funcs 'v2' \
-    --num_old_classes 50 \
-    --prop_train_labels 0.8 \
-    --train_session online \
-    --epochs_online_per_session 50 \
-    --continual_session_num 5 \
-    --online_novel_unseen_num 400 \
-    --online_old_seen_num 25 \
-    --online_novel_seen_num 25 \
-    --init_new_head \
-    --shuffle_classes \
-    --seed 0 \
-    --load_offline_id Old50_Ratio0.8_20250527-153553
-#    --prompt_pool \
-#    --enable_prompt_training
-
-    # Old50_Ratio0.8_20251018-232310 baseline_offline_session_10
-    # Old50_Ratio0.8_20250527-153553 baseline_offline_session_5
-
-#    --prompts_pool_path '/home/ps/_jinwei/Happy-CGCD/prompts_pools/cifar100_thresh0.8_20250819_154139/prompts_pool.pkl' \
-#    --load_offline_id Old50_Ratio0.8_20250527-153553 \ 这是train_happy的
+#CUDA_VISIBLE_DEVICES=0 python train_cape.py \
+   --dataset_name 'cifar100' \
+   --batch_size 128 \
+   --transform 'imagenet' \
+   --warmup_teacher_temp 0.05 \
+   --teacher_temp 0.05 \
+   --warmup_teacher_temp_epochs 10\
+   --lr 0.01 \
+   --memax_old_new_weight 1 \
+   --memax_old_in_weight 1 \
+   --memax_new_in_weight 1 \
+   --proto_aug_weight 1 \
+   --feat_distill_weight 1 \
+   --radius_scale 1.0 \
+   --hardness_temp 0.1 \
+   --eval_funcs 'v2' \
+   --num_old_classes 50 \
+   --prop_train_labels 0.8 \
+   --train_session online \
+   --epochs_online_per_session 30 \
+   --continual_session_num 5 \
+   --online_novel_unseen_num 400 \
+   --online_old_seen_num 25 \
+   --online_novel_seen_num 25 \
+   --init_new_head \
+   --load_offline_id Old50_Ratio0.8_20250527-153553 \
+   --shuffle_classes \
+   --seed 0
+   # --load_offline_id Old50_Ratio0.8_20250605-203249 \
+   --prompt_pool \
+   --enable_prompt_training
 
 
-# Online training
-#echo "========== Phase 2: Online Training with Key-Value Prompts =========="
-#CUDA_VISIBLE_DEVICES=0 python train_with_prompts_v2.py \
-#    --dataset_name 'cifar100' \
-#    --batch_size 128 \
-#    --transform 'imagenet' \
-#    --warmup_teacher_temp 0.05 \
-#    --teacher_temp 0.05 \
-#    --warmup_teacher_temp_epochs 10 \
-#    --lr 0.2 \
-#    --memax_old_new_weight 1 \
-#    --memax_old_in_weight 1 \
-#    --memax_new_in_weight 1 \
-#    --proto_aug_weight 1 \
-#    --feat_distill_weight 1 \
-#    --radius_scale 1.0 \
-#    --hardness_temp 0.1 \
-#    --eval_funcs 'v2' \
-#    --num_old_classes 50 \
-#    --prop_train_labels 0.8 \
-#    --train_session online \
-#    --epochs_online_per_session 30 \
-#    --continual_session_num 5 \
-#    --online_novel_unseen_num 400 \
-#    --online_old_seen_num 25 \
-#    --online_novel_seen_num 25 \
-#    --init_new_head \
-#    --load_offline_id Old50_Ratio0.8_20250829-161037 \
-#    --use_prompts_enhancement \
-#    --prompts_pool_path './prompts_pools/cifar100_thresh0.8_20250819_154139/prompts_pool.pkl' \
-#    --prompts_weight 0.01 \
-#    --prompts_top_k 5 \
-#    --prompts_lr_scale 0.1 \
-#    --shuffle_classes \
-#    --seed 0

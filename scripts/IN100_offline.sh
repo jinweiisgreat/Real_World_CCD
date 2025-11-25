@@ -4,7 +4,7 @@ set -e
 set -x
 
 # Run training script with parameters
-CUDA_VISIBLE_DEVICES=0 python train_happy.py \
+CUDA_VISIBLE_DEVICES=0 python train_cape.py \
     --dataset_name 'imagenet_100' \
     --batch_size 128 \
     --transform 'imagenet' \
