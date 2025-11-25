@@ -1,1 +1,0 @@
-python utils_clip_prompts_pool.py
